@@ -78,7 +78,6 @@ async def _download_media_as_base64(url: str) -> Tuple[str, str]:
         return data_b64, mime
 
 def _build_essay_ai_prompt(task_data: dict) -> str:
-    """Build prompt for essay (Redação) tasks."""
     title = task_data.get("title", "")
     desc = task_data.get("description", "")
     questions = task_data.get("questions", [])
@@ -91,7 +90,7 @@ def _build_essay_ai_prompt(task_data: dict) -> str:
     genre_statement = genre.get("statement", "")
     min_words = genre.get("min_word") or options.get("min_word_count") or 800
     max_words = genre.get("max_word") or options.get("max_word_count") or 1600
-    text_count_unit = options.get("text_count_unit", "char")
+    target_range = f"{min_words} a {max_words}"
 
     assessed_skills = options.get("assessed_skills", [])
     skills_text = ""
@@ -105,9 +104,7 @@ def _build_essay_ai_prompt(task_data: dict) -> str:
     prompt = prompt.replace("{{TITLE}}", str(title))
     prompt = prompt.replace("{{GENRE_STATEMENT}}", str(genre_statement))
     prompt = prompt.replace("{{DESCRIPTION}}", str(desc))
-    prompt = prompt.replace("{{MIN_WORDS}}", str(min_words))
-    prompt = prompt.replace("{{MAX_WORDS}}", str(max_words))
-    prompt = prompt.replace("{{TEXT_COUNT_UNIT}}", str(text_count_unit))
+    prompt = prompt.replace("{{TARGET_RANGE}}", str(target_range))
     prompt = prompt.replace("{{SUPPORT_TEXT}}", str(support_text))
     prompt = prompt.replace("{{SKILLS_TEXT}}", str(skills_text))
     prompt = prompt.replace("{{HUMANIZE_INSTRUCTIONS}}", ESSAY_HUMANIZE_INSTRUCTIONS)
@@ -687,26 +684,54 @@ async def resolve_task_answers(task_data: dict, task_id: int) -> dict:
     if is_essay:
         sys_prompt = "Você é um estudante brasileiro do ensino médio escrevendo uma redação escolar impecável e de nota máxima. A PRIMEIRA LINHA do seu retorno DEVE ser APENAS o Título da redação. A segunda linha em diante deve ser o corpo do texto da redação."
         prompt = _build_essay_ai_prompt(task_data)
+        essay_q = next((q for q in questions if q.get("type") == "essay"), None)
+        options = (essay_q.get("options") or {}) if essay_q else {}
+        genre = options.get("genre", {}) if isinstance(options, dict) else {}
+        min_len = genre.get("min_word") or options.get("min_word_count") or 800
+        max_len = genre.get("max_word") or options.get("max_word_count") or 1600
+        qid = str(essay_q.get("id")) if essay_q else ""
+
+        model_used = ""
+        raw_response = ""
+        answers = {}
+
+        for _ in range(3):
+            try:
+                raw_response, model_used = await _call_ai_completion(
+                    prompt, images=images, system_instruction=sys_prompt
+                )
+            except Exception as e:
+                logger.warning(f"[AI Solver] Essay call failed: {e}")
+                break
+
+            answers = _parse_essay_raw(raw_response, questions)
+            current_body = answers.get(qid, {}).get("answer", {}).get("body", "")
+            body_len = len(current_body.strip())
+
+            if min_len <= body_len <= max_len or not current_body:
+                break
+
+            if body_len > max_len:
+                adjust_text = "O texto anterior ficou grande demais. Reescreva a redação compactando e enxugando os parágrafos, mantendo a ideia central e o estilo humanizado (Título na primeira linha, corpo nas linhas seguintes)."
+            else:
+                adjust_text = "O texto anterior ficou pequeno demais. Reescreva a redação desenvolvendo um pouco mais os parágrafos e argumentos, mantendo o estilo humanizado (Título na primeira linha, corpo nas linhas seguintes)."
+
+            prompt = f"{_build_essay_ai_prompt(task_data)}\n\n[TEXTO ANTERIOR]:\n{current_body}\n\n[AJUSTE]:\n{adjust_text}"
     else:
         sys_prompt = "Você é um assistente educacional brasileiro de elite. Responda TODAS as questões escolares fornecidas rigorosamente no formato JSON solicitado."
         prompt = _build_ai_prompt(task_data)
+        model_used = ""
+        raw_response = ""
+        try:
+            raw_response, model_used = await _call_ai_completion(
+                prompt, images=images, system_instruction=sys_prompt
+            )
+        except Exception as e:
+            logger.warning(f"[AI Solver] Batch call failed: {e}")
 
-    model_used = ""
-    raw_response = ""
-    try:
-        raw_response, model_used = await _call_ai_completion(
-            prompt, images=images, system_instruction=sys_prompt
-        )
-    except Exception as e:
-        logger.warning(f"[AI Solver] Batch call failed: {e}")
-
-    if is_essay:
-        answers = _parse_essay_raw(raw_response, questions)
-    else:
         parsed = _parse_ai_json(raw_response)
         answers = _normalize_ai_answers(parsed, task_data)
 
-    if not is_essay:
         failed_qs = [
             q for q in answerable_questions
             if not _is_question_answer_valid(str(q.get("id")), q.get("type"), answers)
@@ -716,15 +741,15 @@ async def resolve_task_answers(task_data: dict, task_id: int) -> dict:
             title = task_data.get("title", "")
             desc = task_data.get("description", "")
             for q in failed_qs:
-                qid, parsed_q = await _solve_question_individually(q, title, desc)
+                qid_item, parsed_q = await _solve_question_individually(q, title, desc)
                 if parsed_q:
-                    norm_q = _normalize_ai_answers({qid: parsed_q}, task_data)
-                    if qid in norm_q and _is_question_answer_valid(qid, q.get("type"), norm_q):
-                        answers[qid] = norm_q[qid]
+                    norm_q = _normalize_ai_answers({qid_item: parsed_q}, task_data)
+                    if qid_item in norm_q and _is_question_answer_valid(qid_item, q.get("type"), norm_q):
+                        answers[qid_item] = norm_q[qid_item]
 
     if cached_answers:
-        for qid, c_ans in cached_answers.items():
-            answers[str(qid)] = c_ans
+        for qid_cache, c_ans in cached_answers.items():
+            answers[str(qid_cache)] = c_ans
 
     if not is_essay and answers:
         await db_call(save_ai_cached_answers, task_id, answers)
