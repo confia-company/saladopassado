@@ -32,15 +32,15 @@ AI_API_KEY = os.environ.get("AI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 
 AI_MODEL = os.environ.get(
     "AI_MODEL",
-    os.environ.get("OPENAI_MODEL", os.environ.get("OMNIROUTE_MODEL", "ds-web/deepseek-chat"))
+    os.environ.get("OPENAI_MODEL", os.environ.get("OMNIROUTE_MODEL", "ds-web/deepseek-v4-flash-think"))
 )
 AI_FALLBACK_MODEL = os.environ.get(
     "AI_FALLBACK_MODEL",
-    os.environ.get("OMNIROUTE_FALLBACK_MODEL", "ds-web/deepseek-v4-flash-think")
+    os.environ.get("OMNIROUTE_FALLBACK_MODEL", "ds-web/deepseek-reasoner")
 )
 AI_CLAUDE_MODEL = os.environ.get(
     "AI_CLAUDE_MODEL",
-    os.environ.get("OMNIROUTE_CLAUDE_MODEL", "ds-web/deepseek-reasoner")
+    os.environ.get("OMNIROUTE_CLAUDE_MODEL", "ds-web/deepseek-chat")
 )
 
 OMNIROUTE_BASE_URL = AI_BASE_URL
@@ -53,12 +53,12 @@ if candidate_models_env:
     CANDIDATE_MODELS = [m.strip() for m in candidate_models_env.split(",") if m.strip()]
 else:
     CANDIDATE_MODELS = [
-        "ds-web/deepseek-chat",
         "ds-web/deepseek-v4-flash-think",
         "ds-web/deepseek-reasoner",
-        "deepseek-web/deepseek-chat",
+        "ds-web/deepseek-chat",
         "deepseek-web/deepseek-v4-flash-think",
         "deepseek-web/deepseek-reasoner",
+        "deepseek-web/deepseek-chat",
     ]
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "tarefas.db"))
