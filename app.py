@@ -25,13 +25,14 @@ from config import (
 )
 from client import HttpCloakClient, _get_browser_context, _generate_traceparent
 from captcha_solver import tms_apply_with_captcha
-from database import init_db
-from ai_solver import resolve_task_answers
+from database import init_db, get_cached_leiasp_quiz_answer, save_cached_leiasp_quiz_answer
+from ai_solver import resolve_task_answers, resolve_leiasp_objective, resolve_leiasp_dissertative
 from matific_client import (
     MatificClient,
     translate_matific_slug,
     _aggregate_played_episodes
 )
+from leiasp_client import LeiaSPClient, LeiaSPAuthError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("saladopassado.app")
@@ -47,6 +48,10 @@ _MATIFIC_STATE_TTL = 3 * 60
 _matific_locks: dict[str, asyncio.Lock] = {}
 _matific_jobs: dict[str, dict] = {}
 _matific_batches: dict[str, dict] = {}
+
+_task_batches: dict[str, dict] = {}
+_leiasp_jobs: dict[str, dict] = {}
+_leiasp_locks: dict[str, asyncio.Lock] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -91,6 +96,11 @@ class SubmitRequest(BaseModel):
     duration: Optional[float] = None
     min_time: Optional[int] = None
     max_time: Optional[int] = None
+
+class TaskBatchSolveRequest(BaseModel):
+    task_ids: list[int]
+    min_time: Optional[float] = None
+    max_time: Optional[float] = None
 
 class MatificCompleteRequest(BaseModel):
     episode: dict
@@ -175,6 +185,15 @@ async def login(req: LoginRequest, response: Response):
         headers_valida["Authorization"] = f"Bearer {token_sed}"
         await client.post(SED_VALIDA_URL, headers=headers_valida)
 
+        leiasp_jwt = None
+        try:
+            url_leiasp = "https://sedintegracoes.educacao.sp.gov.br/saladofuturobffapi/integracoes/Token?plataforma=LeiaSP%2B"
+            resp_tok = await client.get(url_leiasp, headers=headers_valida)
+            if resp_tok.status_code == 200:
+                leiasp_jwt = resp_tok.json().get("data")
+        except Exception as e:
+            logger.warning(f"[Login] Falha ao pré-obter LeiaSP JWT: {e}")
+
         headers_iptv = {
             "Content-Type": "application/json",
             "Accept-Language": "pt-BR,pt;q=0.9",
@@ -208,11 +227,12 @@ async def login(req: LoginRequest, response: Response):
             "uf": uf_clean,
             "password": req.password,
             "token_sed": token_sed,
+            "leiasp_jwt": leiasp_jwt,
             "auth_token": auth_token,
             "nick": nick,
             "room_name": "",
-            "apply_times": {}, # task_id -> timestamp
-            "active_answer_ids": {}, # task_id -> answer_id
+            "apply_times": {},
+            "active_answer_ids": {},
         }
         _sessions[session_id] = user_session
 
@@ -535,6 +555,146 @@ async def get_job_status(job_id: str):
     if job_id not in _delayed_jobs:
         raise HTTPException(status_code=404, detail="Job não encontrado")
     return _delayed_jobs[job_id]
+
+async def _solve_single_task_worker(batch_id: str, task_id: int, user: dict, min_time: Optional[float], max_time: Optional[float]):
+    batch = _task_batches.get(batch_id)
+    if not batch or task_id not in batch["tasks"]:
+        return
+
+    task_info = batch["tasks"][task_id]
+    task_info["status"] = "resolving_ai"
+    task_info["message"] = "Resolvendo questões com IA..."
+
+    try:
+        task_data = await get_task_detail(task_id, user=user)
+        task_info["title"] = task_data.get("title", task_info.get("title", f"Tarefa #{task_id}"))
+
+        ai_res = await resolve_task_answers(task_data, task_id)
+        if not ai_res.get("success") or not ai_res.get("answers"):
+            task_info["status"] = "failed"
+            task_info["message"] = "IA não gerou respostas para a tarefa."
+            return
+
+        answers = ai_res["answers"]
+        questions = [q for q in task_data.get("questions", []) if q.get("type") not in ("info", "section")]
+        num_q = max(1, len(questions))
+
+        if min_time and max_time:
+            delay = random.uniform(min_time * 60, max_time * 60)
+        else:
+            delay = max(45.0, num_q * 90.0 + random.randint(10, 45))
+
+        task_info["status"] = "waiting_delay"
+        task_info["total_seconds"] = round(delay)
+        task_info["remaining_seconds"] = round(delay)
+        task_info["message"] = f"Aguardando tempo humanizado ({round(delay)}s)..."
+
+        start_time = time.time()
+        while True:
+            if batch.get("status") == "stopped":
+                task_info["status"] = "stopped"
+                task_info["message"] = "Execução cancelada pelo usuário."
+                return
+            elapsed = time.time() - start_time
+            rem = max(0, delay - elapsed)
+            task_info["remaining_seconds"] = round(rem)
+            if rem <= 0:
+                break
+            await asyncio.sleep(min(1.0, rem))
+
+        if batch.get("status") == "stopped":
+            task_info["status"] = "stopped"
+            task_info["message"] = "Execução cancelada pelo usuário."
+            return
+
+        task_info["status"] = "submitting"
+        task_info["message"] = "Enviando respostas..."
+
+        submit_req = SubmitRequest(answers=answers, duration=delay)
+        submit_res = await submit_task(task_id, submit_req, user)
+
+        task_info["status"] = "completed"
+        task_info["score"] = submit_res.get("score")
+        task_info["message"] = submit_res.get("message", "Concluído com sucesso!")
+
+    except Exception as e:
+        task_info["status"] = "failed"
+        task_info["message"] = f"Erro: {str(e)[:150]}"
+    finally:
+        completed = sum(1 for t in batch["tasks"].values() if t["status"] in ("completed", "failed", "stopped"))
+        batch["completed_count"] = completed
+        if completed >= batch["total"] and batch["status"] != "stopped":
+            batch["status"] = "completed"
+
+@app.post("/api/tasks/batch-solve")
+async def start_tasks_batch_solve(req: TaskBatchSolveRequest, user: dict = Depends(get_current_user)):
+    if not req.task_ids:
+        raise HTTPException(status_code=400, detail="Nenhuma tarefa selecionada.")
+
+    batch_id = uuid.uuid4().hex
+    tasks_map = {
+        tid: {
+            "id": tid,
+            "title": f"Tarefa #{tid}",
+            "status": "queued",
+            "remaining_seconds": 0,
+            "total_seconds": 0,
+            "score": None,
+            "message": "Aguardando início..."
+        }
+        for tid in req.task_ids
+    }
+
+    batch = {
+        "id": batch_id,
+        "username": user["username"],
+        "total": len(req.task_ids),
+        "completed_count": 0,
+        "status": "running",
+        "created_at": time.time(),
+        "tasks": tasks_map
+    }
+    _task_batches[batch_id] = batch
+
+    for tid in req.task_ids:
+        asyncio.create_task(_solve_single_task_worker(batch_id, tid, user, req.min_time, req.max_time))
+
+    return {
+        "success": True,
+        "batch_id": batch_id,
+        "total": len(req.task_ids),
+        "message": f"Iniciadas {len(req.task_ids)} tarefas em paralelo com resolução por IA e delay humanizado."
+    }
+
+@app.get("/api/tasks/batch/{batch_id}")
+async def get_tasks_batch_status(batch_id: str, user: dict = Depends(get_current_user)):
+    batch = _task_batches.get(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Lote de tarefas não encontrado.")
+    return {"success": True, "batch": batch}
+
+@app.get("/api/tasks/active-batch")
+async def get_active_tasks_batch(user: dict = Depends(get_current_user)):
+    username = user["username"]
+    user_batches = [b for b in _task_batches.values() if b.get("username") == username]
+    if not user_batches:
+        return {"active": False, "batch": None}
+    user_batches.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    active = [b for b in user_batches if b.get("status") in ("running", "queued")]
+    if active:
+        return {"active": True, "batch": active[0]}
+    recent = user_batches[0]
+    if time.time() - recent.get("created_at", 0) < 30:
+        return {"active": True, "batch": recent}
+    return {"active": False, "batch": None}
+
+@app.post("/api/tasks/batch/{batch_id}/stop")
+async def stop_tasks_batch(batch_id: str, user: dict = Depends(get_current_user)):
+    batch = _task_batches.get(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Lote de tarefas não encontrado.")
+    batch["status"] = "stopped"
+    return {"success": True, "message": "Lote interrompido com sucesso."}
 
 # ---------------------------------------------------------------------------
 # Matific Helpers & Workers
@@ -1107,6 +1267,412 @@ async def set_matific_stats(req: MatificSetStatsRequest, user: dict = Depends(ge
     finally:
         await client.__aexit__(None, None, None)
 
+
+class LeiaSPReadRequest(BaseModel):
+    book_id: Optional[int] = None
+    pages_to_read: Optional[int] = 0
+    min_time: Optional[int] = 20
+    max_time: Optional[int] = 40
+    auto_solve_quiz: Optional[bool] = True
+    sequential: Optional[bool] = False
+
+async def _get_leiasp_client(user: dict) -> LeiaSPClient:
+    token_sed = user.get("token_sed")
+    leiasp_jwt = user.get("leiasp_jwt")
+    if not token_sed and not leiasp_jwt:
+        raise HTTPException(status_code=401, detail="Sessão SED inválida ou expirada.")
+    client = LeiaSPClient(token_sed=token_sed, leiasp_jwt=leiasp_jwt)
+    try:
+        await client.authenticate()
+        return client
+    except Exception as e:
+        logger.error(f"[LeiaSP] Erro ao autenticar no Elefante Letrado: {e}")
+        raise HTTPException(status_code=502, detail=f"Erro ao autenticar no LeiaSP/Elefante Letrado: {e}")
+
+async def _wait_job(job: dict, seconds: int = 0) -> bool:
+    for _ in range(max(1, seconds)):
+        while job.get("status") == "paused":
+            await asyncio.sleep(0.5)
+            if job.get("status") == "stopped":
+                return False
+        if job.get("status") == "stopped":
+            return False
+        if seconds > 0:
+            await asyncio.sleep(1)
+    return job.get("status") != "stopped"
+
+async def _read_single_leiasp_book_core(
+    client: LeiaSPClient,
+    book_id: int,
+    pages_to_read: int,
+    min_time: int,
+    max_time: int,
+    auto_solve_quiz: bool,
+    job: dict
+) -> bool:
+    job["logs"].append(f"Obtendo metadados do livro ID {book_id}...")
+    try:
+        meta = await client.get_book_metadata(book_id)
+    except Exception as e:
+        job["logs"].append(f"Erro ao buscar metadados do livro {book_id}: {e}")
+        return False
+
+    book_title = meta.get("BookTitle") or meta.get("Title") or f"Livro #{book_id}"
+    cover_path = meta.get("CoverPageUrl") or meta.get("ThumbnailCoverPic") or meta.get("CoverUrl") or meta.get("CoverThumbnailUrl") or meta.get("UrlToCoverImage") or ""
+    if cover_path.startswith("/"):
+        cover_path = f"{client.ELEFANTE_CDN_BASE}{cover_path}"
+
+    job["book_id"] = book_id
+    job["book_title"] = book_title
+    job["book_cover_url"] = cover_path
+
+    book_context = {
+        "title": book_title,
+        "authors": meta.get("Authors") or meta.get("Author") or "",
+        "publisher": meta.get("Publisher") or "",
+        "synopsis": meta.get("Synopsis") or meta.get("Description") or "",
+        "isbn": meta.get("Isbn") or "",
+    }
+
+    is_quiz_active = bool(meta.get("IsQuizActive"))
+    total_pages = meta.get("NumberPages") or 100
+    current_page = 1
+
+    reading_info = meta.get("Reading")
+    if isinstance(reading_info, list):
+        for r in reading_info:
+            if r.get("Type") == "Read":
+                current_page = r.get("Page") or 1
+                break
+
+    epub_url_path = meta.get("UrlToEpubFile", "")
+    epub_url = f"{client.ELEFANTE_CDN_BASE}{epub_url_path}" if epub_url_path.startswith("/") else epub_url_path
+
+    page_cfi_map = []
+    epub_hash = ""
+    if epub_url:
+        job["logs"].append("Baixando EPUB para mapear spine e calcular CFIs Colibrio...")
+        epub_hash, page_cfi_map = await client.parse_epub(epub_url, total_pages)
+        if page_cfi_map:
+            job["logs"].append(f"Mapa CFI construído com sucesso: {len(page_cfi_map)} páginas mapeadas.")
+
+    job["total_pages"] = total_pages
+    job["current_page"] = current_page
+    job["logs"].append(f"Iniciando: '{book_title}' | Páginas: {total_pages} | Página atual: {current_page}")
+
+    pages_to_read_actual = pages_to_read if pages_to_read > 0 else (total_pages - current_page + 1)
+    target_page = min(total_pages, current_page + pages_to_read_actual - 1)
+
+    if current_page <= target_page and current_page < total_pages:
+        if epub_url:
+            await client.simulate_colibrio_epub_load(epub_url, job)
+        await client.start_session(book_id)
+
+        pages_read_count = 0
+        for page in range(current_page, target_page + 1):
+            read_time = random.randint(min_time, max_time)
+            job["logs"].append(f"Lendo página {page}/{total_pages} por {read_time}s...")
+
+            if not await _wait_job(job, read_time):
+                job["logs"].append("Leitura interrompida pelo usuário.")
+                return False
+
+            if page_cfi_map and page <= len(page_cfi_map):
+                cfi_value = page_cfi_map[page - 1]
+            else:
+                spine_item = (page * 2) + 2
+                h = epub_hash or "0000000000000000000000000000000000000000"
+                cfi_value = f"com.colibrio.epub.signature:{h}#epubcfi(/6/{spine_item}!/4/1:0)"
+
+            is_final_page = (page == target_page and page >= total_pages)
+            try:
+                if is_final_page:
+                    finish_res = await client.finish_book(book_id, total_pages, cfi_value, read_time)
+                    prog = finish_res.get("progress", {})
+                    if prog.get("success"):
+                        is_ok = finish_res.get("is_completed_with_success")
+                        pts = finish_res.get("points", 0)
+                        job["logs"].append(f"Livro finalizado na API LeiaSP! {'(Sucesso total)' if is_ok else '(Tempo registrado)'} | Pontos: {pts}")
+                    else:
+                        job["logs"].append(f"Aviso ao finalizar livro: {prog.get('error', 'Sem resposta')}")
+                else:
+                    prog_res = await client.send_page_progress(book_id, page, total_pages, cfi_value, read_time)
+                    if prog_res.get("success"):
+                        job["logs"].append(f"Página {page}/{total_pages} registrada com sucesso.")
+                    else:
+                        job["logs"].append(f"Aviso no registro da página {page}: {prog_res.get('error', 'Falha')}")
+            except Exception as e:
+                job["logs"].append(f"Erro ao registrar página {page}: {e}")
+
+            pages_read_count += 1
+            job["current_page"] = page
+            job["progress_percent"] = round((pages_read_count / max(pages_to_read_actual, 1)) * 100, 1)
+
+            if not is_final_page and ((pages_read_count % 10 == 0) or (page == target_page)):
+                try:
+                    close_res = await client.close_book_checkpoint(book_id, read_time)
+                    if close_res:
+                        job["logs"].append(f"Checkpoint intermediário salvo (pág {page})")
+                except Exception as e:
+                    job["logs"].append(f"Aviso no checkpoint: {e}")
+
+    if auto_solve_quiz and is_quiz_active and job.get("status") != "stopped":
+        job["logs"].append("Verificando questionário do livro...")
+        try:
+            quiz_data = await client.fetch_quiz(book_id)
+            if quiz_data.get("QuizEnabled") and not quiz_data.get("QuizComplete"):
+                questions = quiz_data.get("Question", [])
+                if questions:
+                    job["logs"].append(f"Quiz ativo com {len(questions)} questões. Resolvendo...")
+                    q_answers = {}
+                    for idx, q in enumerate(questions):
+                        if job.get("status") == "stopped":
+                            break
+                        q_id = q.get("Id")
+                        q_type = q.get("QuestionTypeId")
+                        q_text = q.get("Text", "")
+
+                        cached = get_cached_leiasp_quiz_answer(book_id, q_id)
+                        if cached:
+                            job["logs"].append(f"Questão {idx+1}: resposta do cache SQLite.")
+                            if q_type != 10:
+                                q_answers[q_id] = {"Id": int(q_id), "Answers": cached if isinstance(cached, list) else [cached], "TrueFalseCorrect": True}
+                            else:
+                                q_answers[q_id] = {
+                                    "Id": int(q_id), "Answers": [], "TrueFalseCorrect": True,
+                                    "DissertativeResponse": str(cached), "DissertativeEvaluation": "correta",
+                                    "DissertativeEvaluationResult": "correta", "DissertativeStudentFeedback": "",
+                                    "DissertativeJsonTextFormEvaluation": "{}", "DissertativeElephantTips": ""
+                                }
+                            continue
+
+                        if q_type != 10:
+                            correct_ids = [int(ans.get("Id")) for ans in q.get("Answer", []) if ans.get("IsCorrectAnswer")]
+                            if not correct_ids:
+                                job["logs"].append(f"Questão {idx+1}: consultando IA...")
+                                correct_ids = await resolve_leiasp_objective(q, book_context)
+                                if not correct_ids and q.get("Answer"):
+                                    correct_ids = [int(q["Answer"][0].get("Id"))]
+                            save_cached_leiasp_quiz_answer(book_id, q_id, q_text, "objective", q.get("Answer", []), correct_ids)
+                            q_answers[q_id] = {"Id": int(q_id), "Answers": correct_ids, "TrueFalseCorrect": True}
+                        else:
+                            job["logs"].append(f"Questão {idx+1} (Dissertativa): gerando resposta com IA...")
+                            student_resp = await resolve_leiasp_dissertative(q_text, book_context)
+                            eval_data = {}
+                            try:
+                                eval_data = await client.evaluate_dissertative_answer(book_id, int(q_id), q_text, student_resp)
+                            except Exception:
+                                pass
+                            save_cached_leiasp_quiz_answer(book_id, q_id, q_text, "dissertative", [], student_resp)
+                            q_answers[q_id] = {
+                                "Id": int(q_id), "Answers": [], "TrueFalseCorrect": True,
+                                "DissertativeResponse": student_resp,
+                                "DissertativeEvaluation": eval_data.get("EvaluationResult") or "correta",
+                                "DissertativeEvaluationResult": eval_data.get("EvaluationResult") or "correta",
+                                "DissertativeStudentFeedback": eval_data.get("StudentFeedback") or "",
+                                "DissertativeJsonTextFormEvaluation": eval_data.get("JsonTextFormEvaluation") or "{}",
+                                "DissertativeElephantTips": eval_data.get("ElephantTips") or ""
+                            }
+
+                    by_milestone = {}
+                    for q in questions:
+                        by_milestone.setdefault(q.get("MilestonePercentage"), []).append(q)
+
+                    for m in sorted(by_milestone.keys(), key=lambda x: (x is None, x or 0)):
+                        if job.get("status") == "stopped":
+                            break
+                        g_answers = [q_answers[q.get("Id")] for q in by_milestone[m] if q.get("Id") in q_answers]
+                        if g_answers:
+                            res_m = await client.submit_milestone_quiz(book_id, m, g_answers)
+                            approved = res_m.get("Approved", False) if isinstance(res_m, dict) else False
+                            job["logs"].append(f"Milestone {m}% enviado | Aprovado={approved}")
+
+                    if job.get("status") != "stopped":
+                        await client.finish_quiz(book_id)
+                        job["logs"].append("Quiz do livro concluído!")
+            else:
+                job["logs"].append("Nenhum quiz pendente para este livro.")
+        except Exception as e:
+            job["logs"].append(f"Aviso durante verificação de quiz: {e}")
+
+    job["logs"].append(f"Livro '{book_title}' finalizado com sucesso!")
+    return True
+
+async def _leiasp_reader_worker(
+    session_data: dict,
+    book_id: Optional[int],
+    pages_to_read: int,
+    min_time: int,
+    max_time: int,
+    auto_solve_quiz: bool,
+    sequential: bool,
+    job_id: str
+):
+    job = _leiasp_jobs.get(job_id)
+    if not job:
+        return
+
+    job["status"] = "running"
+    job["logs"].append("Iniciando sessão do LeiaSP...")
+
+    client = LeiaSPClient(token_sed=session_data.get("token_sed"), leiasp_jwt=session_data.get("leiasp_jwt"))
+    try:
+        await client.authenticate()
+        job["logs"].append("Autenticado com sucesso no Elefante Letrado!")
+
+        if not sequential and book_id:
+            await _read_single_leiasp_book_core(
+                client=client, book_id=book_id, pages_to_read=pages_to_read,
+                min_time=min_time, max_time=max_time, auto_solve_quiz=auto_solve_quiz, job=job
+            )
+        else:
+            job["logs"].append("Modo Sequencial: obtendo catálogo de livros incompletos...")
+            books = await client.get_library_books()
+            incomplete = [b for b in books if not b.get("is_complete") and b.get("progress", 0) < 100.0]
+
+            if not incomplete:
+                job["logs"].append("Nenhum livro incompleto encontrado na biblioteca.")
+            else:
+                job["queue_total"] = len(incomplete)
+                job["queue_completed"] = []
+                job["logs"].append(f"Encontrados {len(incomplete)} livros incompletos. Iniciando fila...")
+                for idx, b in enumerate(incomplete):
+                    if not await _wait_job(job):
+                        job["logs"].append("Fila sequencial interrompida pelo usuário.")
+                        break
+
+                    job["queue_current_idx"] = idx + 1
+                    job["queue_current_title"] = b.get("title")
+                    job["logs"].append(f"\n--- [Livro {idx+1}/{len(incomplete)}] {b.get('title')} ---")
+                    await _read_single_leiasp_book_core(
+                        client=client, book_id=b["id"], pages_to_read=0,
+                        min_time=min_time, max_time=max_time, auto_solve_quiz=auto_solve_quiz, job=job
+                    )
+                    job["queue_completed"].append(b.get("title"))
+
+                    if idx + 1 < len(incomplete) and job["status"] not in ("stopped", "paused"):
+                        pause_sec = random.randint(15, 30)
+                        job["logs"].append(f"Pausa humanizada de {pause_sec}s entre livros...")
+                        if not await _wait_job(job, pause_sec):
+                            break
+
+        if job["status"] not in ("stopped", "failed"):
+            job["status"] = "completed"
+            job["progress_percent"] = 100.0
+            job["logs"].append("Todas as operações do LeiaSP foram concluídas com sucesso!")
+
+    except Exception as e:
+        logger.error(f"[LeiaSP Worker] Erro no worker: {e}", exc_info=True)
+        job["status"] = "failed"
+        job["logs"].append(f"Erro durante a execução: {e}")
+    finally:
+        await client.client.aclose()
+
+@app.get("/api/leiasp/books")
+async def get_leiasp_books_endpoint(user: dict = Depends(get_current_user)):
+    client = await _get_leiasp_client(user)
+    try:
+        books = await client.get_library_books()
+        return {"success": True, "books": books, "total": len(books)}
+    finally:
+        await client.client.aclose()
+
+@app.get("/api/leiasp/active-job")
+async def get_active_leiasp_job_endpoint(user: dict = Depends(get_current_user)):
+    username = user["username"]
+    user_jobs = [j for j in _leiasp_jobs.values() if j.get("username") == username]
+    if not user_jobs:
+        return {"active": False, "job": None}
+
+    user_jobs.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    active = [j for j in user_jobs if j.get("status") in ("running", "paused", "pending")]
+    if active:
+        return {"active": True, "job": active[0]}
+
+    recent = user_jobs[0]
+    if time.time() - recent.get("created_at", 0) < 45:
+        return {"active": True, "job": recent}
+
+    return {"active": False, "job": None}
+
+@app.post("/api/leiasp/read")
+async def start_leiasp_reading_endpoint(req: LeiaSPReadRequest, user: dict = Depends(get_current_user)):
+    job_id = uuid.uuid4().hex
+    job = {
+        "id": job_id,
+        "username": user["username"],
+        "book_id": req.book_id,
+        "book_title": "Carregando...",
+        "book_cover_url": "",
+        "sequential": req.sequential,
+        "queue_total": 0,
+        "queue_current_idx": 0,
+        "queue_current_title": "",
+        "queue_completed": [],
+        "status": "pending",
+        "progress_percent": 0.0,
+        "current_page": 0,
+        "total_pages": 0,
+        "logs": ["Job criado. Aguardando inicialização..."],
+        "created_at": time.time(),
+    }
+    _leiasp_jobs[job_id] = job
+
+    min_t = max(10, req.min_time or 20)
+    max_t = max(min_t, req.max_time or 40)
+
+    asyncio.create_task(
+        _leiasp_reader_worker(
+            session_data=user,
+            book_id=req.book_id,
+            pages_to_read=req.pages_to_read or 0,
+            min_time=min_t,
+            max_time=max_t,
+            auto_solve_quiz=bool(req.auto_solve_quiz),
+            sequential=bool(req.sequential),
+            job_id=job_id
+        )
+    )
+
+    return {"success": True, "job_id": job_id, "message": "Leitura iniciada com sucesso em background."}
+
+@app.get("/api/leiasp/job/{job_id}")
+async def get_leiasp_job_status_endpoint(job_id: str, user: dict = Depends(get_current_user)):
+    job = _leiasp_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de leitura não encontrado.")
+    return {"success": True, "job": job}
+
+@app.post("/api/leiasp/job/{job_id}/pause")
+async def pause_leiasp_job_endpoint(job_id: str, user: dict = Depends(get_current_user)):
+    job = _leiasp_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de leitura não encontrado.")
+    if job.get("status") == "running":
+        job["status"] = "paused"
+        job["logs"].append("⏸️ Leitura pausada pelo usuário.")
+    return {"success": True, "message": "Job pausado com sucesso.", "job": job}
+
+@app.post("/api/leiasp/job/{job_id}/resume")
+async def resume_leiasp_job_endpoint(job_id: str, user: dict = Depends(get_current_user)):
+    job = _leiasp_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de leitura não encontrado.")
+    if job.get("status") == "paused":
+        job["status"] = "running"
+        job["logs"].append("▶️ Leitura retomada pelo usuário.")
+    return {"success": True, "message": "Job retomado com sucesso.", "job": job}
+
+@app.post("/api/leiasp/job/{job_id}/stop")
+async def stop_leiasp_job_endpoint(job_id: str, user: dict = Depends(get_current_user)):
+    job = _leiasp_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job de leitura não encontrado.")
+    job["status"] = "stopped"
+    job["logs"].append("⏹️ Comando de parada recebido do usuário.")
+    return {"success": True, "message": "Job interrompido com sucesso.", "job": job}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="0.0.0.0", port=8080, reload=True)
+

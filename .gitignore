@@ -52,5 +52,6 @@ tarefas.db
 .DS_Store
 .omo/
 
-# Logs & temp
 *.log
+*.md
+*.har

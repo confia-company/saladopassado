@@ -47,6 +47,19 @@ def init_db():
                     created_at TEXT
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS leiasp_quizzes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    book_id INTEGER,
+                    question_id TEXT,
+                    question_text TEXT,
+                    question_type TEXT,
+                    options_json TEXT,
+                    answer_json TEXT,
+                    created_at TEXT,
+                    UNIQUE(book_id, question_id)
+                )
+            """)
     finally:
         conn.close()
 
@@ -175,3 +188,46 @@ def save_question_level_ai_answers(task_data: dict, answers: dict):
                     """, (q_hash, q_type, q.get("statement", "")[:500], ans_data, now))
     finally:
         conn.close()
+
+def get_cached_leiasp_quiz_answer(book_id: int, question_id: any) -> any:
+    conn = db_connect()
+    try:
+        row = conn.execute(
+            "SELECT answer_json, question_type FROM leiasp_quizzes WHERE book_id = ? AND question_id = ?",
+            (int(book_id), str(question_id))
+        ).fetchone()
+        if row and row["answer_json"]:
+            try:
+                return json.loads(row["answer_json"])
+            except Exception:
+                return row["answer_json"]
+        return None
+    finally:
+        conn.close()
+
+def save_cached_leiasp_quiz_answer(book_id: int, question_id: any, question_text: str, question_type: str, options: any, answer: any):
+    conn = db_connect()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        with conn:
+            conn.execute("""
+                INSERT INTO leiasp_quizzes (book_id, question_id, question_text, question_type, options_json, answer_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(book_id, question_id) DO UPDATE SET
+                    question_text = excluded.question_text,
+                    question_type = excluded.question_type,
+                    options_json = excluded.options_json,
+                    answer_json = excluded.answer_json,
+                    created_at = excluded.created_at
+            """, (
+                int(book_id),
+                str(question_id),
+                question_text[:500] if question_text else "",
+                str(question_type) if question_type else "objective",
+                json.dumps(options, ensure_ascii=False) if options else "",
+                json.dumps(answer, ensure_ascii=False) if not isinstance(answer, str) else answer,
+                now
+            ))
+    finally:
+        conn.close()
+

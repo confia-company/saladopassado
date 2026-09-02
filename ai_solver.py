@@ -736,3 +736,76 @@ async def resolve_task_answers(task_data: dict, task_id: int) -> dict:
         "model_used": model_used or "ai-auto",
         "raw": raw_response
     }
+
+
+async def resolve_leiasp_objective(question: dict, book_context: dict) -> list[int]:
+    answers = question.get("Answer", [])
+    if not answers:
+        return []
+
+    ordered = sorted(answers, key=lambda a: a.get("OrderId", 0))
+    choices = [(ans.get("OrderCharacter") or chr(65 + idx), ans.get("Description", ""), int(ans.get("Id", 0))) for idx, ans in enumerate(ordered)]
+    choices_text = "\n".join(f"{letter}) {desc}" for letter, desc, _ in choices)
+
+    context_parts = [
+        f"Título: {book_context.get('title') or 'Livro'}",
+        *( [f"Autor(es): {book_context['authors']}"] if book_context.get("authors") else [] ),
+        *( [f"Editora: {book_context['publisher']}"] if book_context.get("publisher") else [] ),
+        *( [f"Sinopse: {book_context['synopsis']}"] if book_context.get("synopsis") else [] ),
+    ]
+
+    prompt = (
+        f"Você está respondendo a uma questão de compreensão de leitura de um livro escolar.\n\n"
+        f"Dados do livro:\n" + "\n".join(context_parts) + "\n\n"
+        f"Pergunta: {question.get('Text', '')}\n\n"
+        f"Alternativas:\n{choices_text}\n\n"
+        f"Responda APENAS com a letra da alternativa correta (ex: A). "
+        f"Se mais de uma estiver correta, separe por vírgula (ex: A, C)."
+    )
+
+    try:
+        raw_res, _ = await _call_ai_completion(
+            prompt,
+            system_instruction="Você é um estudante brasileiro do ensino fundamental respondendo a questões de compreensão de leitura. Responda apenas a letra(s) da alternativa(s) correta(s), sem explicações adicionais.",
+        )
+        raw = (raw_res or "").strip().upper()
+        letters = [c for c in raw if c.isalpha() and ord(c) - ord("A") < len(choices)]
+        seen = set()
+        chosen = []
+        for letter in letters:
+            if letter not in seen:
+                seen.add(letter)
+                for l, _, aid in choices:
+                    if l == letter and aid:
+                        chosen.append(aid)
+                        break
+        return chosen
+    except Exception as e:
+        logger.warning(f"[LeiaSP AI] Falha ao resolver questão objetiva: {e}")
+        return []
+
+async def resolve_leiasp_dissertative(question_text: str, book_context: dict) -> str:
+    context_parts = [
+        f"Título: {book_context.get('title') or 'Livro'}",
+        *( [f"Autor(es): {book_context['authors']}"] if book_context.get("authors") else [] ),
+        *( [f"Sinopse: {book_context['synopsis']}"] if book_context.get("synopsis") else [] ),
+    ]
+
+    prompt = (
+        f"Você é um estudante brasileiro do ensino fundamental respondendo a uma pergunta sobre um livro que leu.\n\n"
+        f"Dados do livro:\n" + "\n".join(context_parts) + "\n\n"
+        f"Pergunta: '{question_text}'\n\n"
+        f"Escreva uma resposta em português simples e natural, compatível com um aluno do ensino fundamental (1 a 3 frases bem estruturadas). Responda apenas com o texto da resposta, sem aspas, sem introduções ou observações extras."
+    )
+
+    try:
+        raw_res, _ = await _call_ai_completion(
+            prompt,
+            system_instruction="Você é um estudante brasileiro respondendo a uma pergunta sobre um livro. Responda apenas com o texto da resposta, sem JSON, sem aspas e sem explicações.",
+        )
+        return (raw_res or "").strip().strip('"').strip("'")
+    except Exception as e:
+        logger.warning(f"[LeiaSP AI] Falha ao resolver dissertativa: {e}")
+        return "Eu gostei muito deste livro e achei que a história traz um ensinamento muito importante."
+
+

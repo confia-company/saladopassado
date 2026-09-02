@@ -12,6 +12,15 @@ const state = {
   currentMatificJobId: null,
   matificJobPollInterval: null,
   matificBatchPollInterval: null,
+  leiaspBooks: [],
+  currentLeiaSPJobId: null,
+  activeLeiaSPJob: null,
+  leiaspJobPollInterval: null,
+  selectedLeiaSPBook: null,
+  isSequentialLeiaSP: false,
+  selectedTaskIds: new Set(),
+  activeTaskBatch: null,
+  taskBatchPollInterval: null,
 };
 
 const el = {
@@ -99,6 +108,60 @@ const el = {
   inputEditXp: document.getElementById('input-edit-xp'),
   inputEditRank: document.getElementById('input-edit-rank'),
   toastContainer: document.getElementById('toast-container'),
+  badgeLeiaSPCount: document.getElementById('badge-leiasp-count'),
+  leiaspGrid: document.getElementById('leiasp-grid'),
+  leiaspStatTotal: document.getElementById('leiasp-stat-total'),
+  leiaspStatCompleted: document.getElementById('leiasp-stat-completed'),
+  leiaspStatPending: document.getElementById('leiasp-stat-pending'),
+  btnRefreshLeiaSP: document.getElementById('btn-refresh-leiasp'),
+  btnLeiaSPSeq: document.getElementById('btn-leiasp-seq'),
+  modalLeiaSPReader: document.getElementById('modal-leiasp-reader'),
+  leiaspModalTitle: document.getElementById('leiasp-modal-title'),
+  btnCloseLeiaSPModal: document.getElementById('btn-close-leiasp-modal'),
+  leiaspBookNameInput: document.getElementById('leiasp-book-name-input'),
+  leiaspMinTime: document.getElementById('leiasp-min-time'),
+  leiaspMaxTime: document.getElementById('leiasp-max-time'),
+  leiaspAutoQuiz: document.getElementById('leiasp-auto-quiz'),
+  btnStartLeiaSPRead: document.getElementById('btn-start-leiasp-read'),
+  btnStopLeiaSPRead: document.getElementById('btn-stop-leiasp-read'),
+  btnModalPauseResume: document.getElementById('btn-modal-pause-resume'),
+  iconModalPause: document.getElementById('icon-modal-pause'),
+  btnModalPauseText: document.getElementById('btn-modal-pause-text'),
+  btnModalMinimize: document.getElementById('btn-modal-minimize'),
+  leiaspConfigView: document.getElementById('leiasp-config-view'),
+  leiaspProgressView: document.getElementById('leiasp-progress-view'),
+  leiaspJobStatusText: document.getElementById('leiasp-job-status-text'),
+  leiaspJobPercent: document.getElementById('leiasp-job-percent'),
+  leiaspProgressBar: document.getElementById('leiasp-progress-bar'),
+  leiaspPageCounter: document.getElementById('leiasp-page-counter'),
+  leiaspJobState: document.getElementById('leiasp-job-state'),
+  leiaspLogsBox: document.getElementById('leiasp-logs-box'),
+  leiaspActiveBanner: document.getElementById('leiasp-active-banner'),
+  activeBannerCover: document.getElementById('active-banner-cover'),
+  activeBannerCoverFallback: document.getElementById('active-banner-cover-fallback'),
+  activeBannerDot: document.getElementById('active-banner-dot'),
+  activeBannerStatus: document.getElementById('active-banner-status'),
+  activeBannerQueueBadge: document.getElementById('active-banner-queue-badge'),
+  activeBannerTitle: document.getElementById('active-banner-title'),
+  activeBannerProgressBar: document.getElementById('active-banner-progress-bar'),
+  activeBannerPercent: document.getElementById('active-banner-percent'),
+  activeBannerPage: document.getElementById('active-banner-page'),
+  activeBannerLastLog: document.getElementById('active-banner-last-log'),
+  btnBannerPauseResume: document.getElementById('btn-banner-pause-resume'),
+  iconBannerPause: document.getElementById('icon-banner-pause'),
+  btnBannerPauseText: document.getElementById('btn-banner-pause-text'),
+  btnBannerStop: document.getElementById('btn-banner-stop'),
+  btnBannerOpenModal: document.getElementById('btn-banner-open-modal'),
+  tasksSelectAll: document.getElementById('tasks-select-all'),
+  tasksSelectedCount: document.getElementById('tasks-selected-count'),
+  btnBatchSolveTasks: document.getElementById('btn-batch-solve-tasks'),
+  tasksBatchBanner: document.getElementById('tasks-batch-banner'),
+  tasksBatchTitle: document.getElementById('tasks-batch-title'),
+  tasksBatchStatusBadge: document.getElementById('tasks-batch-status-badge'),
+  tasksBatchProgressBar: document.getElementById('tasks-batch-progress-bar'),
+  tasksBatchCounter: document.getElementById('tasks-batch-counter'),
+  tasksBatchActiveThreads: document.getElementById('tasks-batch-active-threads'),
+  btnTasksBatchStop: document.getElementById('btn-tasks-batch-stop'),
 };
 
 const TOAST_ICONS = {
@@ -212,6 +275,11 @@ async function handleLogout() {
   state.matificAssigned = [];
   state.matificAdventure = [];
   state.matificStats = null;
+  state.leiaspBooks = [];
+  if (state.leiaspJobPollInterval) {
+    clearInterval(state.leiaspJobPollInterval);
+    state.leiaspJobPollInterval = null;
+  }
   switchView('auth');
   showToast('Sessão encerrada.', 'info');
 }
@@ -238,9 +306,11 @@ function loadAllData() {
   if (el.badgeMatificCount) el.badgeMatificCount.innerHTML = '<span class="badge-loading">...</span>';
   if (el.badgeMatificAssigned) el.badgeMatificAssigned.innerHTML = '<span class="badge-loading">...</span>';
   if (el.badgeMatificAdventure) el.badgeMatificAdventure.innerHTML = '<span class="badge-loading">...</span>';
+  if (el.badgeLeiaSPCount) el.badgeLeiaSPCount.innerHTML = '<span class="badge-loading">...</span>';
 
   loadTasks();
   loadMatificData();
+  loadLeiaSPData();
 }
 
 async function loadTasks() {
@@ -259,10 +329,21 @@ async function loadTasks() {
     if (el.badgeEssaysCount) el.badgeEssaysCount.textContent = state.essays.length;
 
     renderFilteredTasks();
+    checkActiveTasksBatch();
   } catch (err) {
     if (el.badgeTasksCount) el.badgeTasksCount.textContent = '0';
     if (el.badgeEssaysCount) el.badgeEssaysCount.textContent = '0';
     showToast(err.message, 'error');
+  }
+}
+
+function updateTasksSelectionUI() {
+  const count = state.selectedTaskIds.size;
+  if (el.tasksSelectedCount) el.tasksSelectedCount.textContent = `${count} selecionada(s)`;
+  if (el.btnBatchSolveTasks) el.btnBatchSolveTasks.classList.toggle('hidden', count === 0);
+  if (el.tasksSelectAll) {
+    const totalSelectable = state.tasks.length;
+    el.tasksSelectAll.checked = totalSelectable > 0 && count === totalSelectable;
   }
 }
 
@@ -281,6 +362,7 @@ function renderFilteredTasks() {
 
   renderTaskGrid(el.tasksGrid, filteredTasks, false);
   renderTaskGrid(el.essaysGrid, filteredEssays, true);
+  updateTasksSelectionUI();
   renderFilteredMatific();
 }
 
@@ -294,22 +376,42 @@ function renderTaskGrid(container, items, isEssay) {
     return;
   }
 
-  container.innerHTML = items.map(item => `
-    <div class="task-card glass-panel" data-id="${item.id}" data-essay="${isEssay}">
-      <div class="task-card-header">
-        <span class="badge ${isEssay ? 'badge-purple' : 'badge-indigo'}">${isEssay ? 'Redação' : 'Tarefa'}</span>
-        <span class="task-date">${formatDate(item.expire_at || item.due_date)}</span>
+  container.innerHTML = items.map(item => {
+    const isSelected = state.selectedTaskIds.has(item.id);
+    const batchInfo = state.activeTaskBatch && state.activeTaskBatch.tasks ? state.activeTaskBatch.tasks[item.id] : null;
+    let batchBadge = '';
+    if (batchInfo) {
+      if (batchInfo.status === 'resolving_ai') batchBadge = '<span class="badge badge-warning task-batch-live-badge">IA Resolvendo...</span>';
+      else if (batchInfo.status === 'waiting_delay') batchBadge = `<span class="badge badge-indigo task-batch-live-badge">Delay (${batchInfo.remaining_seconds}s)</span>`;
+      else if (batchInfo.status === 'submitting') batchBadge = '<span class="badge badge-warning task-batch-live-badge">Enviando...</span>';
+      else if (batchInfo.status === 'completed') batchBadge = `<span class="badge badge-success task-batch-live-badge">${batchInfo.score !== null && batchInfo.score !== undefined ? 'Nota ' + batchInfo.score : 'Concluído'}</span>`;
+      else if (batchInfo.status === 'failed') batchBadge = '<span class="badge badge-danger task-batch-live-badge">Falhou</span>';
+      else if (batchInfo.status === 'stopped') batchBadge = '<span class="badge badge-danger task-batch-live-badge">Interrompido</span>';
+    }
+
+    return `
+      <div class="task-card glass-panel ${isSelected ? 'task-selected' : ''}" data-id="${item.id}" data-essay="${isEssay}">
+        <div class="task-card-header">
+          <div class="task-card-header-left">
+            ${!isEssay ? `<input type="checkbox" class="task-select-checkbox" data-id="${item.id}" ${isSelected ? 'checked' : ''}>` : ''}
+            <span class="badge ${isEssay ? 'badge-purple' : 'badge-indigo'}">${isEssay ? 'Redação' : 'Tarefa'}</span>
+          </div>
+          <div class="task-card-header-right">
+            ${batchBadge}
+            <span class="task-date">${formatDate(item.expire_at || item.due_date)}</span>
+          </div>
+        </div>
+        <h3 class="task-title" title="${item.title}">${item.title}</h3>
+        <p class="task-snippet">${stripHtml(item.description || 'Sem descrição informada.')}</p>
+        <div class="task-footer">
+          <span class="task-meta">${item.questions_count ? item.questions_count + ' questões' : ''}</span>
+          <button class="btn btn-primary btn-sm btn-open-task" data-id="${item.id}" data-essay="${isEssay}">
+            <span>Resolver com IA</span>
+          </button>
+        </div>
       </div>
-      <h3 class="task-title" title="${item.title}">${item.title}</h3>
-      <p class="task-snippet">${stripHtml(item.description || 'Sem descrição informada.')}</p>
-      <div class="task-footer">
-        <span class="task-meta">${item.questions_count ? item.questions_count + ' questões' : ''}</span>
-        <button class="btn btn-primary btn-sm btn-open-task" data-id="${item.id}" data-essay="${isEssay}">
-          <span>Resolver com IA</span>
-        </button>
-      </div>
-    </div>
-  `).join('');
+    `;
+  }).join('');
 
   container.querySelectorAll('.btn-open-task').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -318,7 +420,181 @@ function renderTaskGrid(container, items, isEssay) {
       openTaskModal(taskId, isEssayType);
     });
   });
+
+  if (!isEssay) {
+    container.querySelectorAll('.task-select-checkbox').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        e.stopPropagation();
+        const id = parseInt(cb.dataset.id);
+        if (cb.checked) {
+          state.selectedTaskIds.add(id);
+        } else {
+          state.selectedTaskIds.delete(id);
+        }
+        const card = cb.closest('.task-card');
+        if (card) card.classList.toggle('task-selected', cb.checked);
+        updateTasksSelectionUI();
+      });
+    });
+  }
 }
+
+async function startTasksBatchSolve() {
+  if (state.selectedTaskIds.size === 0) {
+    showToast('Selecione pelo menos uma tarefa para executar em lote.', 'warning');
+    return;
+  }
+
+  const taskIds = Array.from(state.selectedTaskIds);
+  if (el.btnBatchSolveTasks) el.btnBatchSolveTasks.disabled = true;
+
+  try {
+    const res = await fetch('/api/tasks/batch-solve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_ids: taskIds })
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Falha ao iniciar execução em lote.');
+
+    showToast(data.message || 'Tarefas iniciadas em paralelo com delay humanizado!', 'success');
+    state.selectedTaskIds.clear();
+    updateTasksSelectionUI();
+    renderFilteredTasks();
+
+    pollTasksBatch(data.batch_id);
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    if (el.btnBatchSolveTasks) el.btnBatchSolveTasks.disabled = false;
+  }
+}
+
+function pollTasksBatch(batchId) {
+  if (state.taskBatchPollInterval) {
+    clearInterval(state.taskBatchPollInterval);
+  }
+
+  state.taskBatchPollInterval = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/tasks/batch/${batchId}`);
+      if (!res.ok) {
+        clearInterval(state.taskBatchPollInterval);
+        state.taskBatchPollInterval = null;
+        return;
+      }
+
+      const data = await res.json();
+      const batch = data.batch;
+      if (!batch) return;
+
+      state.activeTaskBatch = batch;
+      renderActiveTasksBatchBanner(batch);
+      updateTaskCardBadges(batch);
+
+      if (batch.status === 'completed' || batch.status === 'stopped' || batch.status === 'failed') {
+        clearInterval(state.taskBatchPollInterval);
+        state.taskBatchPollInterval = null;
+
+        if (batch.status === 'completed') {
+          showToast('Todas as tarefas do lote foram concluídas com sucesso!', 'success');
+        } else if (batch.status === 'stopped') {
+          showToast('Execução do lote de tarefas interrompida.', 'info');
+        }
+
+        setTimeout(() => {
+          if (el.tasksBatchBanner) el.tasksBatchBanner.classList.add('hidden');
+          loadTasks();
+        }, 3500);
+      }
+    } catch (err) {}
+  }, 1000);
+}
+
+function renderActiveTasksBatchBanner(batch) {
+  if (!el.tasksBatchBanner || !batch) return;
+  el.tasksBatchBanner.classList.remove('hidden');
+
+  const total = batch.total || 0;
+  const completed = batch.completed_count || 0;
+  const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const runningCount = Object.values(batch.tasks || {}).filter(t => t.status === 'resolving_ai' || t.status === 'waiting_delay' || t.status === 'submitting').length;
+
+  if (el.tasksBatchTitle) el.tasksBatchTitle.textContent = `Executando ${total} Tarefas em Paralelo (${runningCount} threads ativas)`;
+  if (el.tasksBatchProgressBar) el.tasksBatchProgressBar.style.width = `${percent}%`;
+  if (el.tasksBatchCounter) el.tasksBatchCounter.textContent = `${completed} / ${total} concluídas (${percent}%)`;
+  if (el.tasksBatchActiveThreads) el.tasksBatchActiveThreads.textContent = `${runningCount} em processamento`;
+
+  const isStopped = batch.status === 'stopped';
+  const isDone = batch.status === 'completed';
+
+  if (el.tasksBatchStatusBadge) {
+    el.tasksBatchStatusBadge.textContent = isDone ? 'Concluído' : (isStopped ? 'Interrompido' : 'Em andamento');
+    el.tasksBatchStatusBadge.className = `badge ${isDone ? 'badge-success' : (isStopped ? 'badge-danger' : 'badge-indigo')}`;
+  }
+}
+
+function updateTaskCardBadges(batch) {
+  if (!batch || !batch.tasks) return;
+  for (const [tid, tinfo] of Object.entries(batch.tasks)) {
+    const card = document.querySelector(`.task-card[data-id="${tid}"]`);
+    if (!card) continue;
+    const badgeContainer = card.querySelector('.task-card-header-right');
+    if (!badgeContainer) continue;
+
+    let existingBadge = badgeContainer.querySelector('.task-batch-live-badge');
+    if (!existingBadge) {
+      existingBadge = document.createElement('span');
+      existingBadge.className = 'badge task-batch-live-badge';
+      badgeContainer.insertBefore(existingBadge, badgeContainer.firstChild);
+    }
+
+    if (tinfo.status === 'resolving_ai') {
+      existingBadge.className = 'badge badge-warning task-batch-live-badge';
+      existingBadge.textContent = 'IA Resolvendo...';
+    } else if (tinfo.status === 'waiting_delay') {
+      existingBadge.className = 'badge badge-indigo task-batch-live-badge';
+      existingBadge.textContent = `Delay (${tinfo.remaining_seconds}s)`;
+    } else if (tinfo.status === 'submitting') {
+      existingBadge.className = 'badge badge-warning task-batch-live-badge';
+      existingBadge.textContent = 'Enviando...';
+    } else if (tinfo.status === 'completed') {
+      existingBadge.className = 'badge badge-success task-batch-live-badge';
+      existingBadge.textContent = tinfo.score !== null && tinfo.score !== undefined ? `Nota ${tinfo.score}` : 'Concluído';
+    } else if (tinfo.status === 'failed') {
+      existingBadge.className = 'badge badge-danger task-batch-live-badge';
+      existingBadge.textContent = 'Falhou';
+    } else if (tinfo.status === 'stopped') {
+      existingBadge.className = 'badge badge-danger task-batch-live-badge';
+      existingBadge.textContent = 'Interrompido';
+    }
+  }
+}
+
+async function checkActiveTasksBatch() {
+  try {
+    const res = await fetch('/api/tasks/active-batch');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.active && data.batch) {
+      state.activeTaskBatch = data.batch;
+      renderActiveTasksBatchBanner(data.batch);
+      pollTasksBatch(data.batch.id);
+    }
+  } catch (err) {}
+}
+
+async function stopTasksBatch() {
+  if (!state.activeTaskBatch) return;
+  try {
+    await fetch(`/api/tasks/batch/${state.activeTaskBatch.id}/stop`, { method: 'POST' });
+    showToast('Comando de cancelamento do lote enviado.', 'info');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
 
 async function loadMatificData() {
   isMatificLoading = true;
@@ -1019,6 +1295,352 @@ function closeMatificModal() {
   el.modalMatificSim.classList.add('hidden');
 }
 
+async function loadLeiaSPData() {
+  if (el.leiaspGrid) {
+    el.leiaspGrid.innerHTML = '<div class="loading-state" style="grid-column:1/-1;"><div class="spinner"></div><p>Carregando biblioteca do LeiaSP...</p></div>';
+  }
+  try {
+    const res = await fetch('/api/leiasp/books');
+    if (!res.ok) throw new Error('Falha ao carregar livros do LeiaSP.');
+    const data = await res.json();
+    state.leiaspBooks = data.books || [];
+
+    const total = state.leiaspBooks.length;
+    const completed = state.leiaspBooks.filter(b => b.is_complete || b.progress >= 100).length;
+    const pending = total - completed;
+
+    if (el.badgeLeiaSPCount) el.badgeLeiaSPCount.textContent = pending;
+    if (el.leiaspStatTotal) el.leiaspStatTotal.textContent = total;
+    if (el.leiaspStatCompleted) el.leiaspStatCompleted.textContent = completed;
+    if (el.leiaspStatPending) el.leiaspStatPending.textContent = pending;
+
+    renderLeiaSPBooks();
+    checkActiveLeiaSPJob();
+  } catch (err) {
+    if (el.leiaspGrid) {
+      el.leiaspGrid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><p style="color:var(--danger);">Erro ao carregar livros: ${err.message}</p></div>`;
+    }
+  }
+}
+
+function renderLeiaSPBooks() {
+  if (!el.leiaspGrid) return;
+  if (state.leiaspBooks.length === 0) {
+    el.leiaspGrid.innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><p>Nenhum livro encontrado na biblioteca do LeiaSP.</p></div>';
+    return;
+  }
+
+  const activeBookId = state.activeLeiaSPJob && state.activeLeiaSPJob.status === 'running' ? state.activeLeiaSPJob.book_id : null;
+
+  el.leiaspGrid.innerHTML = state.leiaspBooks.map(book => {
+    const isDone = book.is_complete || book.progress >= 100;
+    const isCurrentlyReading = activeBookId && (book.id === activeBookId);
+    const statusBadge = isDone
+      ? '<span class="task-badge badge-success">Concluído</span>'
+      : (book.progress > 0 ? `<span class="task-badge badge-warning">${book.progress}% lido</span>` : '<span class="task-badge badge-indigo">Pendente</span>');
+
+    const coverImg = book.cover_url
+      ? `<img src="${book.cover_url}" alt="${book.title}" class="book-cover-img" loading="lazy" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';"><div class="book-cover-placeholder" style="display:none;"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></div>`
+      : `<div class="book-cover-placeholder"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></div>`;
+
+    const pagesDisplay = book.total_pages > 0
+      ? (book.current_page > 0 ? `${book.current_page}/${book.total_pages}` : `${book.total_pages}`)
+      : 'Pendente';
+
+    return `
+      <div class="leiasp-card glass-panel ${isCurrentlyReading ? 'reading-active' : ''}" data-book-id="${book.id}">
+        <div class="book-cover-wrapper">
+          ${coverImg}
+          <div class="book-cover-overlay">
+            <span class="book-level-badge">${book.level || book.genre || 'Leitura'}</span>
+          </div>
+        </div>
+        <div class="book-info">
+          <div class="book-header">
+            ${statusBadge}
+            ${book.is_quiz_active ? '<span class="quiz-badge" title="Contém quiz avaliativo">Quiz</span>' : ''}
+          </div>
+          <h4 class="book-title" title="${book.title}">${book.title}</h4>
+          <p class="book-author">${book.author || 'Autor Desconhecido'}</p>
+          <div class="book-meta">
+            <span>Páginas: <strong>${pagesDisplay}</strong></span>
+            <span>Progresso: <strong>${book.progress}%</strong></span>
+          </div>
+          <div class="progress-bar-bg" style="background: rgba(255,255,255,0.06); height: 5px; border-radius: 3px; overflow: hidden; margin: 8px 0;">
+            <div style="width: ${book.progress}%; height: 100%; background: ${isDone ? 'var(--success)' : 'var(--primary)'};"></div>
+          </div>
+          <button class="btn btn-primary btn-sm btn-block btn-read-book" data-book-id="${book.id}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            <span>${isDone ? 'Ler Novamente' : (book.progress > 0 ? 'Continuar Leitura' : 'Iniciar Leitura')}</span>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  el.leiaspGrid.querySelectorAll('.btn-read-book').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const bookId = parseInt(btn.dataset.bookId);
+      const book = state.leiaspBooks.find(b => b.id === bookId);
+      if (book) openLeiaSPModal(book, false);
+    });
+  });
+}
+
+async function checkActiveLeiaSPJob() {
+  try {
+    const res = await fetch('/api/leiasp/active-job');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.active && data.job) {
+      state.currentLeiaSPJobId = data.job.id;
+      state.activeLeiaSPJob = data.job;
+      renderActiveLeiaSPBanner(data.job);
+      pollLeiaSPJob(data.job.id);
+    } else {
+      hideActiveLeiaSPBanner();
+    }
+  } catch (err) {}
+}
+
+function renderActiveLeiaSPBanner(job) {
+  if (!el.leiaspActiveBanner || !job) return;
+  el.leiaspActiveBanner.classList.remove('hidden');
+
+  if (el.activeBannerTitle) el.activeBannerTitle.textContent = job.book_title || 'Leitura de Livro';
+
+  if (el.activeBannerCover) {
+    if (job.book_cover_url) {
+      el.activeBannerCover.src = job.book_cover_url;
+      el.activeBannerCover.style.display = 'block';
+      if (el.activeBannerCoverFallback) el.activeBannerCoverFallback.style.display = 'none';
+    } else {
+      el.activeBannerCover.style.display = 'none';
+      if (el.activeBannerCoverFallback) el.activeBannerCoverFallback.style.display = 'flex';
+    }
+  }
+
+  const percent = job.progress_percent || 0;
+  if (el.activeBannerPercent) el.activeBannerPercent.textContent = `${percent}%`;
+  if (el.activeBannerProgressBar) el.activeBannerProgressBar.style.width = `${percent}%`;
+  if (el.activeBannerPage) el.activeBannerPage.textContent = `${job.current_page || 0}/${job.total_pages || 0}`;
+
+  if (job.logs && job.logs.length > 0 && el.activeBannerLastLog) {
+    el.activeBannerLastLog.textContent = job.logs[job.logs.length - 1];
+  }
+
+  if (job.sequential && job.queue_total > 0 && el.activeBannerQueueBadge) {
+    el.activeBannerQueueBadge.textContent = `Livro ${job.queue_current_idx || 1}/${job.queue_total}`;
+    el.activeBannerQueueBadge.classList.remove('hidden');
+  } else if (el.activeBannerQueueBadge) {
+    el.activeBannerQueueBadge.classList.add('hidden');
+  }
+
+  const isPaused = job.status === 'paused';
+  const isRunning = job.status === 'running';
+
+  if (el.activeBannerStatus) {
+    el.activeBannerStatus.textContent = isPaused ? 'Leitura Pausada' : (isRunning ? 'Lendo em segundo plano...' : (job.status === 'completed' ? 'Leitura Concluída!' : 'Leitura Interrompida'));
+    el.activeBannerStatus.style.color = isPaused ? '#f59e0b' : (job.status === 'stopped' ? '#ef4444' : '#10b981');
+  }
+
+  const playSvg = '<polygon points="5 3 19 12 5 21 5 3"></polygon>';
+  const pauseSvg = '<rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect>';
+
+  if (el.btnBannerPauseText && el.iconBannerPause) {
+    el.btnBannerPauseText.textContent = isPaused ? 'Retomar' : 'Pausar';
+    el.iconBannerPause.innerHTML = isPaused ? playSvg : pauseSvg;
+  }
+
+  if (el.btnModalPauseText && el.iconModalPause) {
+    el.btnModalPauseText.textContent = isPaused ? 'Retomar Leitura' : 'Pausar Leitura';
+    el.iconModalPause.innerHTML = isPaused ? playSvg : pauseSvg;
+  }
+}
+
+function hideActiveLeiaSPBanner() {
+  if (el.leiaspActiveBanner) el.leiaspActiveBanner.classList.add('hidden');
+  if (el.leiaspGrid) {
+    el.leiaspGrid.querySelectorAll('.leiasp-card.reading-active').forEach(c => c.classList.remove('reading-active'));
+  }
+}
+
+function openLeiaSPModal(book, isSequential = false) {
+  state.selectedLeiaSPBook = book;
+  state.isSequentialLeiaSP = isSequential;
+
+  if (isSequential) {
+    if (el.leiaspBookNameInput) el.leiaspBookNameInput.value = 'Fila Sequencial (Todos os livros incompletos da conta)';
+    if (el.leiaspModalTitle) el.leiaspModalTitle.textContent = 'Leitura Sequencial em Fila';
+  } else if (book) {
+    const pagesInfo = book.total_pages > 0 ? `${book.total_pages} págs` : 'Pendente';
+    const curInfo = book.current_page > 0 ? ` - atual: pág ${book.current_page}` : '';
+    if (el.leiaspBookNameInput) el.leiaspBookNameInput.value = `${book.title} (${pagesInfo}${curInfo})`;
+    if (el.leiaspModalTitle) el.leiaspModalTitle.textContent = 'Leitura Humanizada de Livro';
+  }
+
+  if (el.leiaspConfigView) el.leiaspConfigView.classList.remove('hidden');
+  if (el.leiaspProgressView) el.leiaspProgressView.classList.add('hidden');
+  if (el.modalLeiaSPReader) el.modalLeiaSPReader.classList.remove('hidden');
+}
+
+function openLeiaSPMonitorModal() {
+  if (el.leiaspConfigView) el.leiaspConfigView.classList.add('hidden');
+  if (el.leiaspProgressView) el.leiaspProgressView.classList.remove('hidden');
+  if (el.modalLeiaSPReader) el.modalLeiaSPReader.classList.remove('hidden');
+  if (state.activeLeiaSPJob && el.leiaspModalTitle) {
+    el.leiaspModalTitle.textContent = state.activeLeiaSPJob.sequential ? 'Monitor de Leitura Sequencial' : 'Monitor de Telemetria LeiaSP';
+  }
+}
+
+function closeLeiaSPModal() {
+  if (el.modalLeiaSPReader) el.modalLeiaSPReader.classList.add('hidden');
+}
+
+async function startLeiaSPReading() {
+  const minTime = parseInt(el.leiaspMinTime.value) || 20;
+  const maxTime = parseInt(el.leiaspMaxTime.value) || 40;
+  const autoQuiz = el.leiaspAutoQuiz.checked;
+
+  const payload = {
+    book_id: state.isSequentialLeiaSP ? null : (state.selectedLeiaSPBook ? state.selectedLeiaSPBook.id : null),
+    pages_to_read: 0,
+    min_time: minTime,
+    max_time: maxTime,
+    auto_solve_quiz: autoQuiz,
+    sequential: state.isSequentialLeiaSP,
+  };
+
+  el.btnStartLeiaSPRead.disabled = true;
+
+  try {
+    const res = await fetch('/api/leiasp/read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Erro ao iniciar leitura.');
+
+    state.currentLeiaSPJobId = data.job_id;
+    showToast(data.message || 'Leitura iniciada com sucesso em segundo plano!', 'success');
+
+    el.leiaspConfigView.classList.add('hidden');
+    el.leiaspProgressView.classList.remove('hidden');
+    el.leiaspLogsBox.innerHTML = '<div class="log-line text-muted">Job iniciado. Conectando telemetria...</div>';
+
+    pollLeiaSPJob(data.job_id);
+  } catch (err) {
+    showToast(err.message, 'error');
+  } finally {
+    el.btnStartLeiaSPRead.disabled = false;
+  }
+}
+
+function pollLeiaSPJob(jobId) {
+  if (state.leiaspJobPollInterval) {
+    clearInterval(state.leiaspJobPollInterval);
+  }
+
+  state.leiaspJobPollInterval = setInterval(async () => {
+    try {
+      const res = await fetch(`/api/leiasp/job/${jobId}`);
+      if (!res.ok) {
+        clearInterval(state.leiaspJobPollInterval);
+        state.leiaspJobPollInterval = null;
+        return;
+      }
+
+      const data = await res.json();
+      const job = data.job;
+      if (!job) return;
+
+      state.activeLeiaSPJob = job;
+      renderActiveLeiaSPBanner(job);
+
+      const percent = job.progress_percent || 0;
+      if (el.leiaspJobPercent) el.leiaspJobPercent.textContent = `${percent}%`;
+      if (el.leiaspProgressBar) el.leiaspProgressBar.style.width = `${percent}%`;
+      if (el.leiaspPageCounter) el.leiaspPageCounter.textContent = `${job.current_page || 0}/${job.total_pages || 0}`;
+      
+      const isPaused = job.status === 'paused';
+      if (el.leiaspJobState) {
+        el.leiaspJobState.textContent = isPaused ? 'Pausado' : (job.status === 'running' ? 'Em andamento' : (job.status === 'completed' ? 'Concluído' : job.status));
+      }
+
+      if (el.leiaspJobStatusText) {
+        if (isPaused) {
+          el.leiaspJobStatusText.textContent = `Pausado em '${job.book_title || 'Livro'}'`;
+        } else if (job.status === 'running') {
+          el.leiaspJobStatusText.textContent = `Lendo '${job.book_title || 'Livro'}'...`;
+        } else if (job.status === 'completed') {
+          el.leiaspJobStatusText.textContent = 'Leitura Concluída!';
+        } else if (job.status === 'stopped') {
+          el.leiaspJobStatusText.textContent = 'Leitura Interrompida';
+        }
+      }
+
+      if (job.logs && el.leiaspLogsBox) {
+        el.leiaspLogsBox.innerHTML = job.logs.map(l => `<div class="log-line">${l}</div>`).join('');
+        el.leiaspLogsBox.scrollTop = el.leiaspLogsBox.scrollHeight;
+      }
+
+      if (job.status === 'completed' || job.status === 'failed' || job.status === 'stopped') {
+        clearInterval(state.leiaspJobPollInterval);
+        state.leiaspJobPollInterval = null;
+        state.currentLeiaSPJobId = null;
+
+        if (job.status === 'completed') {
+          showToast('Leitura e quizzes do LeiaSP finalizados com sucesso!', 'success');
+        } else if (job.status === 'stopped') {
+          showToast('Leitura interrompida.', 'info');
+        }
+
+        setTimeout(() => {
+          hideActiveLeiaSPBanner();
+          loadLeiaSPData();
+        }, 4000);
+      }
+    } catch (err) {}
+  }, 1200);
+}
+
+async function togglePauseResumeLeiaSP() {
+  const jobId = state.currentLeiaSPJobId || (state.activeLeiaSPJob ? state.activeLeiaSPJob.id : null);
+  if (!jobId) return;
+
+  const isPaused = state.activeLeiaSPJob && state.activeLeiaSPJob.status === 'paused';
+  const endpoint = isPaused ? `/api/leiasp/job/${jobId}/resume` : `/api/leiasp/job/${jobId}/pause`;
+
+  try {
+    const res = await fetch(endpoint, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Erro ao alternar pausa.');
+    
+    if (state.activeLeiaSPJob) {
+      state.activeLeiaSPJob.status = isPaused ? 'running' : 'paused';
+      renderActiveLeiaSPBanner(state.activeLeiaSPJob);
+    }
+    showToast(isPaused ? 'Leitura retomada!' : 'Leitura pausada!', 'info');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function stopLeiaSPReading() {
+  const jobId = state.currentLeiaSPJobId || (state.activeLeiaSPJob ? state.activeLeiaSPJob.id : null);
+  if (!jobId) return;
+
+  try {
+    await fetch(`/api/leiasp/job/${jobId}/stop`, { method: 'POST' });
+    showToast('Comando de parada enviado.', 'info');
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+
 document.addEventListener('DOMContentLoaded', () => {
   checkAuth();
 
@@ -1029,6 +1651,31 @@ document.addEventListener('DOMContentLoaded', () => {
   el.btnAiFill.addEventListener('click', handleAiFill);
   el.btnSubmitNow.addEventListener('click', () => handleSubmit(false));
   el.btnSubmitDelayed.addEventListener('click', () => handleSubmit(true));
+
+  if (el.tasksSelectAll) {
+    el.tasksSelectAll.addEventListener('change', (e) => {
+      const checked = e.target.checked;
+      state.selectedTaskIds.clear();
+      if (checked) {
+        state.tasks.forEach(t => state.selectedTaskIds.add(t.id));
+      }
+      renderFilteredTasks();
+    });
+  }
+  if (el.btnBatchSolveTasks) el.btnBatchSolveTasks.addEventListener('click', startTasksBatchSolve);
+  if (el.btnTasksBatchStop) el.btnTasksBatchStop.addEventListener('click', stopTasksBatch);
+
+  if (el.btnRefreshLeiaSP) el.btnRefreshLeiaSP.addEventListener('click', loadLeiaSPData);
+  if (el.btnLeiaSPSeq) el.btnLeiaSPSeq.addEventListener('click', () => openLeiaSPModal(null, true));
+  if (el.btnCloseLeiaSPModal) el.btnCloseLeiaSPModal.addEventListener('click', closeLeiaSPModal);
+  if (el.btnStartLeiaSPRead) el.btnStartLeiaSPRead.addEventListener('click', startLeiaSPReading);
+  if (el.btnStopLeiaSPRead) el.btnStopLeiaSPRead.addEventListener('click', stopLeiaSPReading);
+  if (el.btnModalPauseResume) el.btnModalPauseResume.addEventListener('click', togglePauseResumeLeiaSP);
+  if (el.btnModalMinimize) el.btnModalMinimize.addEventListener('click', closeLeiaSPModal);
+
+  if (el.btnBannerPauseResume) el.btnBannerPauseResume.addEventListener('click', togglePauseResumeLeiaSP);
+  if (el.btnBannerStop) el.btnBannerStop.addEventListener('click', stopLeiaSPReading);
+  if (el.btnBannerOpenModal) el.btnBannerOpenModal.addEventListener('click', openLeiaSPMonitorModal);
 
   if (el.btnCloseMatificModal) el.btnCloseMatificModal.addEventListener('click', closeMatificModal);
   if (el.btnStartMatificSim) el.btnStartMatificSim.addEventListener('click', startMatificSimulation);
@@ -1078,9 +1725,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      if (!el.modalTask.classList.contains('hidden')) closeModal();
-      if (!el.modalMatificSim.classList.contains('hidden')) closeMatificModal();
+      if (el.modalTask && !el.modalTask.classList.contains('hidden')) closeModal();
+      if (el.modalMatificSim && !el.modalMatificSim.classList.contains('hidden')) closeMatificModal();
       if (el.modalMatificStats && !el.modalMatificStats.classList.contains('hidden')) el.modalMatificStats.classList.add('hidden');
+      if (el.modalLeiaSPReader && !el.modalLeiaSPReader.classList.contains('hidden')) closeLeiaSPModal();
     }
   });
 

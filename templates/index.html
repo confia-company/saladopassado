@@ -175,6 +175,14 @@
             <span>Matific</span>
             <span class="tab-badge badge-cyan" id="badge-matific-count">0</span>
           </button>
+          <button class="tab-btn" data-tab="tab-leiasp">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+            </svg>
+            <span>LeiaSP</span>
+            <span class="tab-badge badge-emerald" id="badge-leiasp-count">0</span>
+          </button>
         </div>
 
         <div class="search-box">
@@ -188,6 +196,47 @@
 
       <div class="tab-content-area">
         <section id="tab-tasks" class="tab-pane active">
+          <div class="tasks-toolbar glass-panel" id="tasks-toolbar">
+            <div class="tasks-toolbar-left">
+              <label class="checkbox-container tasks-select-all-label">
+                <input type="checkbox" id="tasks-select-all">
+                <span>Selecionar Todas</span>
+              </label>
+              <span id="tasks-selected-count" class="stat-pill">0 selecionadas</span>
+            </div>
+            <div class="tasks-toolbar-right">
+              <button id="btn-batch-solve-tasks" class="btn btn-primary btn-sm hidden">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                <span>Fazer Selecionadas em Paralelo</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="tasks-batch-banner" class="tasks-batch-banner glass-panel hidden">
+            <div class="batch-banner-main">
+              <div class="batch-banner-header">
+                <div class="batch-banner-title-group">
+                  <span class="status-indicator-dot"></span>
+                  <strong id="tasks-batch-title">Executando Tarefas em Paralelo</strong>
+                </div>
+                <span id="tasks-batch-status-badge" class="badge badge-indigo">Em andamento</span>
+              </div>
+              <div class="batch-progress-bar-bg">
+                <div id="tasks-batch-progress-bar" class="batch-progress-bar" style="width: 0%;"></div>
+              </div>
+              <div class="batch-banner-meta">
+                <span id="tasks-batch-counter">0 / 0 concluídas</span>
+                <span id="tasks-batch-active-threads">0 em execução</span>
+              </div>
+            </div>
+            <div class="batch-banner-actions">
+              <button id="btn-tasks-batch-stop" class="btn btn-danger btn-sm" title="Interromper">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"></rect></svg>
+                <span>Parar</span>
+              </button>
+            </div>
+          </div>
+
           <div id="tasks-grid" class="tasks-grid"></div>
         </section>
 
@@ -376,6 +425,76 @@
             </div>
           </div>
         </section>
+
+        <section id="tab-leiasp" class="tab-pane">
+          <div class="leiasp-toolbar glass-panel">
+            <div class="leiasp-stats">
+              <div class="stat-pill"><span class="stat-label">Total de Livros:</span> <strong id="leiasp-stat-total">0</strong></div>
+              <div class="stat-pill"><span class="stat-label">Lidos:</span> <strong id="leiasp-stat-completed">0</strong></div>
+              <div class="stat-pill"><span class="stat-label">Pendentes:</span> <strong id="leiasp-stat-pending">0</strong></div>
+            </div>
+            <div class="leiasp-actions">
+              <button id="btn-leiasp-seq" class="btn btn-primary btn-sm">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                <span>Ler Todos em Sequência</span>
+              </button>
+              <button id="btn-refresh-leiasp" class="btn btn-secondary btn-sm" title="Recarregar biblioteca">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                <span>Atualizar</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="leiasp-active-banner" class="leiasp-active-banner glass-panel hidden">
+            <div class="active-banner-left">
+              <div class="active-banner-cover-wrapper">
+                <img id="active-banner-cover" src="" alt="Capa" class="active-banner-cover" onerror="this.style.display='none';">
+                <div id="active-banner-cover-fallback" class="active-banner-cover-placeholder">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>
+                </div>
+              </div>
+              <div class="active-banner-info">
+                <div class="active-banner-header">
+                  <span class="status-indicator-dot" id="active-banner-dot"></span>
+                  <span class="active-banner-state" id="active-banner-status">Lendo em segundo plano...</span>
+                  <span class="badge badge-indigo hidden" id="active-banner-queue-badge">Livro 1/1</span>
+                </div>
+                <h4 class="active-banner-title" id="active-banner-title">Título do Livro</h4>
+                <div class="active-banner-progress-row">
+                  <div class="active-banner-progress-bar-bg">
+                    <div id="active-banner-progress-bar" class="active-banner-progress-bar"></div>
+                  </div>
+                  <span id="active-banner-percent" class="active-banner-percent">0%</span>
+                </div>
+                <div class="active-banner-meta">
+                  <span>Página: <strong id="active-banner-page">0/0</strong></span>
+                  <span id="active-banner-last-log" class="active-banner-log-snippet text-muted">Aguardando telemetria...</span>
+                </div>
+              </div>
+            </div>
+            <div class="active-banner-actions">
+              <button id="btn-banner-pause-resume" class="btn btn-secondary btn-sm" title="Pausar ou Retomar">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="icon-banner-pause"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                <span id="btn-banner-pause-text">Pausar</span>
+              </button>
+              <button id="btn-banner-stop" class="btn btn-danger btn-sm" title="Interromper">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"></rect></svg>
+                <span>Parar</span>
+              </button>
+              <button id="btn-banner-open-modal" class="btn btn-primary btn-sm" title="Ver logs detalhados">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                <span>Ver Logs</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="leiasp-grid" class="leiasp-grid">
+            <div class="empty-state">
+              <div class="spinner"></div>
+              <p>Carregando livros do LeiaSP...</p>
+            </div>
+          </div>
+        </section>
       </div>
     </main>
   </div>
@@ -552,6 +671,91 @@
 
       <div class="modal-footer">
         <button id="btn-save-matific-stats" class="btn btn-primary btn-block">Salvar no Servidor</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal-leiasp-reader" class="modal-overlay hidden">
+    <div class="modal-card glass-panel" style="max-width: 600px;">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <span class="badge badge-emerald">LeiaSP &bull; Colibrio</span>
+          <h3 class="modal-title" id="leiasp-modal-title">Leitura Humanizada de Livro</h3>
+        </div>
+        <button class="btn-close" id="btn-close-leiasp-modal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="leiasp-config-view">
+          <div class="form-group">
+            <label>Livro Selecionado</label>
+            <input type="text" id="leiasp-book-name-input" readonly class="form-control" style="background: rgba(255,255,255,0.05);">
+          </div>
+          <div class="form-row-grid">
+            <div class="form-group">
+              <label for="leiasp-min-time">Tempo Mínimo por Pág. (s)</label>
+              <input type="number" id="leiasp-min-time" class="form-control" value="20" min="10" max="120">
+            </div>
+            <div class="form-group">
+              <label for="leiasp-max-time">Tempo Máximo por Pág. (s)</label>
+              <input type="number" id="leiasp-max-time" class="form-control" value="40" min="15" max="180">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="checkbox-container" style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.9rem;">
+              <input type="checkbox" id="leiasp-auto-quiz" checked>
+              <span>Resolver Questionário (Quiz) automaticamente com IA após a leitura</span>
+            </label>
+          </div>
+          <div style="margin-top: 20px;">
+            <button id="btn-start-leiasp-read" class="btn btn-primary btn-block">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+              <span>Iniciar Leitura Humanizada</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="leiasp-progress-view" class="hidden">
+          <div class="batch-status-card glass-panel" style="margin-bottom: 15px;">
+            <div class="batch-header-status">
+              <div>
+                <span class="status-indicator-dot"></span>
+                <span id="leiasp-job-status-text">Lendo livro...</span>
+              </div>
+              <span id="leiasp-job-percent" style="font-weight: 700; color: #10b981;">0%</span>
+            </div>
+            <div class="progress-bar-bg" style="background: rgba(255,255,255,0.08); height: 8px; border-radius: 4px; overflow: hidden; margin: 10px 0;">
+              <div id="leiasp-progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #10b981, #06b6d4); transition: width 0.3s ease;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-size: 0.85rem; color: #94a3b8;">
+              <span>Página: <strong id="leiasp-page-counter" style="color: #f1f5f9;">0/0</strong></span>
+              <span>Status: <strong id="leiasp-job-state" style="color: #f1f5f9;">Em andamento</strong></span>
+            </div>
+          </div>
+
+          <div class="terminal-container">
+            <div class="terminal-header">
+              <span class="terminal-title">Telemetria Colibrio & Logs</span>
+            </div>
+            <div id="leiasp-logs-box" class="terminal-body" style="max-height: 220px; overflow-y: auto;">
+              <div class="log-line text-muted">Aguardando início do job...</div>
+            </div>
+          </div>
+
+          <div style="margin-top: 15px; display: flex; gap: 8px;">
+            <button id="btn-modal-pause-resume" class="btn btn-secondary" style="flex: 1;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" id="icon-modal-pause"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+              <span id="btn-modal-pause-text">Pausar</span>
+            </button>
+            <button id="btn-stop-leiasp-read" class="btn btn-danger" style="flex: 1;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"></rect></svg>
+              <span>Interromper</span>
+            </button>
+            <button id="btn-modal-minimize" class="btn btn-secondary" style="flex: 0.8;" title="Continuar em segundo plano">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline></svg>
+              <span>Minimizar</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
