@@ -178,7 +178,8 @@ def _build_ai_prompt(task_data: dict) -> str:
 
         elif q_type == "cloud" and isinstance(options, dict):
             words = options.get("words", [])
-            questions_section += f"Palavras disponíveis para ordenar: {', '.join(words)}\n"
+            questions_section += f"Banco de palavras disponíveis: {', '.join(words)}\n"
+            questions_section += "Instrução: Selecione e ordene APENAS as palavras necessárias para formar a frase com sentido semântico completo e correto. ATENÇÃO: Podem existir palavras distratoras/extras no banco que NÃO devem ser incluídas na resposta. Ignore as palavras que sobrarem.\n"
 
         elif q_type == "text_ai" and isinstance(options, dict):
             kw = options.get("ai_grading_keywords", [])
@@ -193,13 +194,9 @@ def _build_ai_prompt(task_data: dict) -> str:
         elif q_type == "order-sentences" and isinstance(options, dict):
             incorrects = options.get("incorrects", [])
             sentences = options.get("sentences", [])
-            if incorrects:
-                for s in incorrects:
-                    questions_section += f"  - {s.get('value','')}\n"
-            elif sentences:
-                for s in sentences:
-                    questions_section += f"  - {s}\n"
-            questions_section += "Instrução: Retorne a lista ordenada contendo o texto exato das sentenças.\n"
+            items = sentences or [s.get("value", "") for s in incorrects if isinstance(s, dict)]
+            questions_section += f"Sentenças disponíveis: {', '.join(items)}\n"
+            questions_section += "Instrução: Ordene APENAS as sentenças que fazem sentido cronológico/lógico. Descarte quaisquer sentenças distratoras/incorretas.\n"
 
     prompt = TASK_PROMPT_TEMPLATE
     prompt = prompt.replace("{{TITLE}}", str(title))
