@@ -32,18 +32,17 @@ AI_API_KEY = os.environ.get("AI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
 
 AI_MODEL = os.environ.get(
     "AI_MODEL",
-    os.environ.get("OPENAI_MODEL", os.environ.get("OMNIROUTE_MODEL", "ds-web/deepseek-v4-flash-think"))
+    os.environ.get("OPENAI_MODEL", os.environ.get("OMNIROUTE_MODEL", "ds-web/deepseek-chat"))
 )
 AI_FALLBACK_MODEL = os.environ.get(
     "AI_FALLBACK_MODEL",
-    os.environ.get("OMNIROUTE_FALLBACK_MODEL", "gemini-web/gemini-3.6-flash")
+    os.environ.get("OMNIROUTE_FALLBACK_MODEL", "ds-web/deepseek-v4-flash-think")
 )
 AI_CLAUDE_MODEL = os.environ.get(
     "AI_CLAUDE_MODEL",
-    os.environ.get("OMNIROUTE_CLAUDE_MODEL", "claude-web/claude-5-sonnet")
+    os.environ.get("OMNIROUTE_CLAUDE_MODEL", "ds-web/deepseek-reasoner")
 )
 
-# Aliases for backward compatibility
 OMNIROUTE_BASE_URL = AI_BASE_URL
 OMNIROUTE_MODEL = AI_MODEL
 OMNIROUTE_FALLBACK_MODEL = AI_FALLBACK_MODEL
@@ -54,12 +53,12 @@ if candidate_models_env:
     CANDIDATE_MODELS = [m.strip() for m in candidate_models_env.split(",") if m.strip()]
 else:
     CANDIDATE_MODELS = [
-        AI_MODEL,
-        AI_FALLBACK_MODEL,
-        AI_CLAUDE_MODEL,
         "ds-web/deepseek-chat",
+        "ds-web/deepseek-v4-flash-think",
         "ds-web/deepseek-reasoner",
-        "oc/nemotron-3-ultra-free",
+        "deepseek-web/deepseek-chat",
+        "deepseek-web/deepseek-v4-flash-think",
+        "deepseek-web/deepseek-reasoner",
     ]
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(BASE_DIR, "tarefas.db"))

@@ -1,10 +1,12 @@
 import base64
+import io
 import json
 import logging
 import re
 import unicodedata
 from typing import Optional, Tuple
 import httpx
+from PIL import Image
 
 import config
 from config import (
@@ -37,7 +39,6 @@ def _strip_html(html_str: str) -> str:
     return re.sub(r'\s+', ' ', text).strip()
 
 def _extract_images_from_task(task_data: dict) -> list[str]:
-    """Collect image URLs referenced in question statements or media fields (ignoring decorative banners)."""
     images = []
     for q in task_data.get("questions", []):
         if q.get("type") in ("info", "section"):
@@ -68,14 +69,35 @@ def _extract_images_from_task(task_data: dict) -> list[str]:
     return images
 
 async def _download_media_as_base64(url: str) -> Tuple[str, str]:
-    """Download image or audio URL and return (base64_data, mime_type)."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    if url.startswith("data:image/") or url.startswith("data:"):
+        parts = url.split(",", 1)
+        data_b64 = parts[1] if len(parts) > 1 else ""
+        try:
+            raw_bytes = base64.b64decode(data_b64)
+            img = Image.open(io.BytesIO(raw_bytes))
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA" if "A" in img.mode else "RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode("utf-8"), "image/png"
+        except Exception:
+            return data_b64, "image/png"
+
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         resp = await client.get(url)
         if resp.status_code != 200:
             raise Exception(f"Failed to download media {url}: HTTP {resp.status_code}")
-        mime = resp.headers.get("content-type", "image/png").split(";")[0].strip()
-        data_b64 = base64.b64encode(resp.content).decode("utf-8")
-        return data_b64, mime
+        try:
+            img = Image.open(io.BytesIO(resp.content))
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA" if "A" in img.mode else "RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            data_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            return data_b64, "image/png"
+        except Exception:
+            data_b64 = base64.b64encode(resp.content).decode("utf-8")
+            return data_b64, "image/png"
 
 def _build_essay_ai_prompt(task_data: dict) -> str:
     title = task_data.get("title", "")
@@ -111,7 +133,6 @@ def _build_essay_ai_prompt(task_data: dict) -> str:
     return prompt
 
 def _build_ai_prompt(task_data: dict) -> str:
-    """Build prompt for standard objective / dissertative tasks."""
     if task_data.get("is_essay") or task_data.get("task_is_essay") or any(q.get("type") == "essay" for q in task_data.get("questions", [])):
         return _build_essay_ai_prompt(task_data)
 
@@ -191,9 +212,8 @@ async def _call_ai_completion(
     images: list[str] = None,
     system_instruction: str = None,
     model: str = None,
-    timeout: float = 35.0
+    timeout: float = 60.0
 ) -> Tuple[str, str]:
-    """Call OpenAI-compatible chat completion endpoint with automatic fallback across candidate models."""
     url = f"{AI_BASE_URL}/chat/completions"
     headers = {
         "Content-Type": "application/json",
@@ -226,7 +246,7 @@ async def _call_ai_completion(
     candidate_models = []
     if model:
         candidate_models.append(model)
-    for m in getattr(config, "CANDIDATE_MODELS", ["ds-web/deepseek-v4-flash-think", "gemini-web/gemini-3.6-flash", "claude-web/claude-5-sonnet"]):
+    for m in getattr(config, "CANDIDATE_MODELS", ["ds-web/deepseek-chat", "ds-web/deepseek-v4-flash-think", "ds-web/deepseek-reasoner"]):
         if m and m not in candidate_models:
             candidate_models.append(m)
 
