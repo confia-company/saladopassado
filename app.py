@@ -95,6 +95,97 @@ async def get_current_user(request: Request) -> dict:
     return user
 
 
+def _tms_targets_query(rooms: list, nick: str) -> str:
+    """Build publication_target query fragment from /room/user payload.
+
+    Mirrors the official web client (see harfiles/tarefas_update.har):
+    room names, room:nick variants and numeric group_categories ids.
+    """
+    targets: list[str] = []
+    for r in rooms or []:
+        rname = r.get("name")
+        if rname:
+            targets.append(f"publication_target={rname}")
+            if nick:
+                targets.append(f"publication_target={rname}:{nick}")
+        for cat in r.get("group_categories", []) or []:
+            cid = cat.get("id")
+            if cid:
+                targets.append(f"publication_target={cid}")
+    return "&".join(targets)
+
+
+_ANSWER_FIELDS = ("id", "nick", "status", "task_id", "answers", "duration", "revised_request_count")
+
+
+def _build_apply_url(task_id: int, room_name: str, answer_id: Optional[int] = None) -> str:
+    """Apply URL exactly like the official client.
+
+    Draft tasks must include answer_id + answer_fields: short apply returns
+    answer=None and the later PUT/POST then fails with 400. Fresh tasks use
+    the short form without answer_id.
+    """
+    base = f"{IPTV_BASE_URL}/tms/task/{task_id}/apply"
+    if answer_id:
+        fields = "&".join(f"answer_fields={f}" for f in _ANSWER_FIELDS)
+        return (
+            f"{base}?preview_mode=false&answer_id={answer_id}"
+            f"&{fields}&token_code=null&room_name={room_name}"
+        )
+    return f"{base}?preview_mode=false&token_code=null&room_name={room_name}"
+
+
+def _decode_apply_response(resp) -> dict:
+    """Apply returns JSON or base64-encoded JSON depending on the task."""
+    try:
+        return resp.json()
+    except Exception:
+        return json.loads(base64.b64decode(resp.text).decode("utf-8"))
+
+
+async def _fetch_todo_page(client, headers: dict, targets_query: str, *, is_essay: bool,
+                           expired_only: bool, filter_expired: bool,
+                           answer_statuses: Optional[list] = None) -> list:
+    essay_flag = "true" if is_essay else "false"
+    url = (
+        f"{IPTV_BASE_URL}/tms/task/todo?expired_only={'true' if expired_only else 'false'}"
+        f"&limit=100&offset=0&filter_expired={'true' if filter_expired else 'false'}"
+        f"&is_exam=false&with_answer=true&is_essay={essay_flag}"
+        f"&{targets_query}&with_apply_moment=true"
+    )
+    if answer_statuses:
+        url += "".join(f"&answer_statuses={s}" for s in answer_statuses)
+    resp = await client.get(url, headers=headers)
+    if resp.status_code != 200:
+        logger.warning(f"[tasks] todo fetch failed HTTP {resp.status_code}: {url[:120]}")
+        return []
+    try:
+        data = resp.json()
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _merge_todo_pages(pages: list[list]) -> list:
+    """Dedupe by task id, preferring entries that carry answer info (draft)."""
+    merged: dict[int, dict] = {}
+    for page in pages:
+        for t in page or []:
+            tid = t.get("id")
+            if tid is None:
+                continue
+            prev = merged.get(tid)
+            if prev is None:
+                merged[tid] = t
+                continue
+            # Prefer draft/answer-carrying entry over bare pending (answer_status None).
+            prev_score = 1 if prev.get("answer_status") == "draft" or prev.get("answer_id") else 0
+            cur_score = 1 if t.get("answer_status") == "draft" or t.get("answer_id") else 0
+            if cur_score > prev_score:
+                merged[tid] = t
+    return list(merged.values())
+
+
 def _task_cache_key(user: dict, task_id: int) -> tuple[str, int]:
     return (user.get("username", ""), int(task_id))
 
@@ -356,25 +447,31 @@ async def list_tasks(user: dict = Depends(get_current_user)):
         if rooms:
             user["room_name"] = rooms[0].get("name", user.get("room_name", ""))
 
-        targets = []
-        for r in rooms:
-            rname = r.get("name")
-            if rname:
-                targets.append(f"publication_target={rname}")
-                targets.append(f"publication_target={rname}:{user['nick']}")
-            for cat in r.get("group_categories", []):
-                cid = cat.get("id")
-                if cid:
-                    targets.append(f"publication_target={cid}")
-        targets_query = "&".join(targets)
+        targets_query = _tms_targets_query(rooms, user.get("nick", ""))
 
-        url_tasks = f"{IPTV_BASE_URL}/tms/task/todo?expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=false&{targets_query}&with_apply_moment=true"
-        resp_tasks = await client.get(url_tasks, headers=headers_tms)
-        tasks_raw = resp_tasks.json() if resp_tasks.status_code == 200 else []
+        # Official client flow (harfiles/tarefas_update.har):
+        # - pending non-expired: no answer_statuses filter
+        # - drafts non-expired: answer_statuses=draft
+        # - expired (pending + drafts): expired_only=true + answer_statuses=draft
+        tasks_pages = [
+            await _fetch_todo_page(client, headers_tms, targets_query, is_essay=False,
+                                   expired_only=False, filter_expired=True, answer_statuses=None),
+            await _fetch_todo_page(client, headers_tms, targets_query, is_essay=False,
+                                   expired_only=False, filter_expired=True, answer_statuses=["draft"]),
+            await _fetch_todo_page(client, headers_tms, targets_query, is_essay=False,
+                                   expired_only=True, filter_expired=False, answer_statuses=["draft"]),
+        ]
+        essays_pages = [
+            await _fetch_todo_page(client, headers_tms, targets_query, is_essay=True,
+                                   expired_only=False, filter_expired=True, answer_statuses=None),
+            await _fetch_todo_page(client, headers_tms, targets_query, is_essay=True,
+                                   expired_only=False, filter_expired=True, answer_statuses=["draft"]),
+            await _fetch_todo_page(client, headers_tms, targets_query, is_essay=True,
+                                   expired_only=True, filter_expired=False, answer_statuses=["draft"]),
+        ]
 
-        url_essays = f"{IPTV_BASE_URL}/tms/task/todo?expired_only=false&limit=100&offset=0&filter_expired=true&is_exam=false&with_answer=true&is_essay=true&{targets_query}&with_apply_moment=true"
-        resp_essays = await client.get(url_essays, headers=headers_tms)
-        essays_raw = resp_essays.json() if resp_essays.status_code == 200 else []
+        tasks_raw = _merge_todo_pages(tasks_pages)
+        essays_raw = _merge_todo_pages(essays_pages)
 
         tasks_pending = [t for t in tasks_raw if t.get("answer_status") not in ("finished", "submitted")]
         essays_pending = [t for t in essays_raw if t.get("answer_status") not in ("finished", "submitted")]
@@ -384,8 +481,25 @@ async def list_tasks(user: dict = Depends(get_current_user)):
         "essays": essays_pending
     }
 
+async def _discover_task_answer_id(client, headers_tms: dict, targets_query: str, task_id: int) -> Optional[int]:
+    """Find answer_id for a draft task by scanning todo draft pages (expired + fresh)."""
+    for is_essay in (False, True):
+        for expired_only, filter_expired in ((False, True), (True, False)):
+            page = await _fetch_todo_page(
+                client, headers_tms, targets_query, is_essay=is_essay,
+                expired_only=expired_only, filter_expired=filter_expired,
+                answer_statuses=["draft"],
+            )
+            for t in page:
+                if t.get("id") == task_id and t.get("answer_id"):
+                    try:
+                        return int(t["answer_id"])
+                    except Exception:
+                        return t["answer_id"]
+    return None
+
 @app.get("/api/task/{task_id}")
-async def get_task_detail(task_id: int, user: dict = Depends(get_current_user)):
+async def get_task_detail(task_id: int, answer_id: Optional[int] = None, user: dict = Depends(get_current_user)):
     fp = _get_browser_context()
     headers_tms = {
         "x-api-key": user["auth_token"],
@@ -400,17 +514,45 @@ async def get_task_detail(task_id: int, user: dict = Depends(get_current_user)):
     }
 
     room_name = user.get("room_name", "")
-    url_apply = f"{IPTV_BASE_URL}/tms/task/{task_id}/apply?preview_mode=false&token_code=null&room_name={room_name}"
+    resolved_answer_id = answer_id or user.get("active_answer_ids", {}).get(task_id)
 
     async with HttpCloakClient(timeout=30.0) as client:
+        url_apply = _build_apply_url(task_id, room_name, resolved_answer_id)
         resp = await tms_apply_with_captcha(client, url_apply, headers_tms, task_id)
+        task_data = None
+        if resp.status_code == 200:
+            try:
+                task_data = _decode_apply_response(resp)
+            except Exception:
+                task_data = None
+        needs_discovery = (
+            not resolved_answer_id
+            and (resp.status_code == 400 or (task_data is not None and task_data.get("answer") is None))
+        )
+        if needs_discovery:
+            # Short apply loses the draft (answer=None) and the later PUT/POST fails
+            # with 400. Discover answer_id via todo and retry in HAR format.
+            try:
+                url_rooms = f"{IPTV_BASE_URL}/room/user?list_all=true&with_cards=true"
+                resp_rooms = await client.get(url_rooms, headers=headers_tms)
+                rooms = resp_rooms.json().get("rooms", []) if resp_rooms.status_code == 200 else []
+                if rooms:
+                    user["room_name"] = rooms[0].get("name", room_name)
+                    room_name = user["room_name"]
+                targets_query = _tms_targets_query(rooms, user.get("nick", ""))
+                found = await _discover_task_answer_id(client, headers_tms, targets_query, task_id)
+                if found:
+                    resolved_answer_id = found
+                    url_apply = _build_apply_url(task_id, room_name, resolved_answer_id)
+                    resp = await tms_apply_with_captcha(client, url_apply, headers_tms, task_id)
+                    task_data = None
+            except Exception as e:
+                logger.warning(f"[task-detail] answer discovery failed for {task_id}: {e}")
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail=f"Erro ao abrir tarefa (HTTP {resp.status_code})")
 
-        try:
-            task_data = resp.json()
-        except Exception:
-            task_data = json.loads(base64.b64decode(resp.text).decode("utf-8"))
+        if task_data is None:
+            task_data = _decode_apply_response(resp)
 
     _task_cache[_task_cache_key(user, task_id)] = task_data
     user["apply_times"][task_id] = time.time()
@@ -519,7 +661,10 @@ async def submit_task(task_id: int, req: SubmitRequest, user: dict = Depends(get
             except Exception as e:
                 logger.warning(f"essay-check warning: {e}")
 
-        url_apply = f"{IPTV_BASE_URL}/tms/task/{task_id}/apply?preview_mode=false&token_code=null&room_name={room_name}"
+        # Refresh answer_id via apply using the HAR format (answer_id + answer_fields when known).
+        # Short apply on a draft returns answer=None, then PUT/POST fails with 400,
+        # so always include answer_id if we have it.
+        url_apply = _build_apply_url(task_id, room_name, answer_id)
         headers_tms = {
             "x-api-key": user["auth_token"],
             "x-api-platform": "webclient",
@@ -530,7 +675,7 @@ async def submit_task(task_id: int, req: SubmitRequest, user: dict = Depends(get
         apply_resp = await tms_apply_with_captcha(client, url_apply, headers_tms, task_id)
         if apply_resp.status_code == 200:
             try:
-                apply_data = apply_resp.json()
+                apply_data = _decode_apply_response(apply_resp)
                 if isinstance(apply_data.get("answer"), dict) and apply_data["answer"].get("id"):
                     answer_id = apply_data["answer"]["id"]
             except Exception:

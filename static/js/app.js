@@ -455,12 +455,19 @@ function renderTaskGrid(container, items, isEssay) {
       else if (batchInfo.status === 'stopped') batchBadge = '<span class="badge badge-danger task-batch-live-badge">Interrompido</span>';
     }
 
+    const isDraft = item.answer_status === 'draft' || (item.answer_id !== null && item.answer_id !== undefined);
+    const isExpired = item.task_expired === true || item.expired === true;
+    const draftBadge = isDraft ? '<span class="badge badge-warning">Rascunho</span>' : '';
+    const expiredBadge = isExpired ? '<span class="badge badge-danger">Expirada</span>' : '';
+    const answerId = item.answer_id || (item.answer && item.answer.id) || '';
+
     return `
       <div class="task-card glass-panel ${isSelected ? 'task-selected' : ''}" data-id="${item.id}" data-essay="${isEssay}">
         <div class="task-card-header">
           <div class="task-card-header-left">
             ${!isEssay ? `<input type="checkbox" class="task-select-checkbox" data-id="${item.id}" ${isSelected ? 'checked' : ''}>` : ''}
             <span class="badge ${isEssay ? 'badge-purple' : 'badge-indigo'}">${isEssay ? 'Redação' : 'Tarefa'}</span>
+            ${draftBadge}${expiredBadge}
           </div>
           <div class="task-card-header-right">
             ${batchBadge}
@@ -470,9 +477,9 @@ function renderTaskGrid(container, items, isEssay) {
         <h3 class="task-title" title="${item.title}">${item.title}</h3>
         <p class="task-snippet">${stripHtml(item.description || 'Sem descrição informada.')}</p>
         <div class="task-footer">
-          <span class="task-meta">${item.questions_count ? item.questions_count + ' questões' : ''}</span>
-          <button class="btn btn-primary btn-sm btn-open-task" data-id="${item.id}" data-essay="${isEssay}">
-            <span>Resolver com IA</span>
+          <span class="task-meta">${item.questions_count || item.question_count ? (item.questions_count || item.question_count) + ' questões' : ''}</span>
+          <button class="btn btn-primary btn-sm btn-open-task" data-id="${item.id}" data-essay="${isEssay}" data-answer-id="${answerId}">
+            <span>${isDraft ? 'Continuar Rascunho' : 'Resolver com IA'}</span>
           </button>
         </div>
       </div>
@@ -483,7 +490,8 @@ function renderTaskGrid(container, items, isEssay) {
     btn.addEventListener('click', () => {
       const taskId = btn.dataset.id;
       const isEssayType = btn.dataset.essay === 'true';
-      openTaskModal(taskId, isEssayType);
+      const answerId = btn.dataset.answerId ? parseInt(btn.dataset.answerId, 10) : null;
+      openTaskModal(taskId, isEssayType, answerId || null);
     });
   });
 
@@ -1169,7 +1177,7 @@ async function stopMatificBatch() {
   }
 }
 
-async function openTaskModal(taskId, isEssay) {
+async function openTaskModal(taskId, isEssay, answerId = null) {
   state.isEssay = isEssay;
   state.currentTask = null;
   state.currentAnswers = {};
@@ -1183,7 +1191,8 @@ async function openTaskModal(taskId, isEssay) {
   el.modalTaskTitle.textContent = 'Carregando...';
 
   try {
-    const res = await fetch(`/api/task/${taskId}`);
+    const url = answerId ? `/api/task/${taskId}?answer_id=${answerId}` : `/api/task/${taskId}`;
+    const res = await fetch(url);
     if (!res.ok) throw new Error('Erro ao carregar conteúdo da tarefa.');
 
     const data = await res.json();
@@ -1378,10 +1387,16 @@ async function handleSubmit(delayed = false) {
   btn.disabled = true;
 
   try {
+    const currentAnswerId = state.currentTask.answer && state.currentTask.answer.id
+      ? state.currentTask.answer.id
+      : null;
+    const body = currentAnswerId
+      ? { answers: payloadAnswers, answer_id: currentAnswerId }
+      : { answers: payloadAnswers };
     const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ answers: payloadAnswers })
+      body: JSON.stringify(body)
     });
 
     const data = await res.json();
