@@ -1385,6 +1385,14 @@ textarea:focus,
   border-width: 2px;
   border-top-color: var(--primary);
 }
+.spinner.xs {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
+}
+.task-batch-live-badge {
+  gap: 0.3rem;
+}
 
 @keyframes spin {
   to { transform: rotate(360deg); }

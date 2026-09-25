@@ -43,13 +43,12 @@ Vários alunos podem usar o mesmo backend (inclusive em sequência na mesma aba)
 - **Workers congelam as credenciais**: jobs em background continuam agindo como o usuário que os criou, mesmo após logout ou login de outra conta.
 - **Frontend limpa tudo ao trocar de conta**: estado, polls, banners, modais, logs e formulário de login são resetados; respostas atrasadas da conta anterior são ignoradas (proteção contra race).
 - **Sessões com validade de 24h**: sessões expiradas são invalidadas e expurgadas automaticamente; o logout também limpa o cache Matific e de tarefas do usuário.
-- **Sem credenciais no repositório**: scripts auxiliares (`test_resolve.py`, `auto_runner.py`, `batch_worker.py`) leem credenciais apenas de variáveis de ambiente — nunca commite RA/senha reais.
+- **Sem credenciais no repositório**: scripts auxiliares (`auto_runner.py`, `batch_worker.py`) leem credenciais apenas de variáveis de ambiente — nunca commite RA/senha reais.
 
 Variáveis de ambiente dos scripts auxiliares:
 
 | Variável | Usada por | Descrição |
 | :--- | :--- | :--- |
-| `TEST_RA`, `TEST_DIGITO`, `TEST_UF`, `TEST_PASSWORD` | `test_resolve.py` | Credenciais do smoke test (obrigatórias) |
 | `SALADOPASSADO_RA`, `SALADOPASSADO_PASSWORD` | `auto_runner.py`, `batch_worker.py` | Credenciais dos runners manuais (obrigatórias) |
 
 ---

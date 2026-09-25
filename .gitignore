@@ -42,6 +42,7 @@ venv.bak/
 *.db
 *.db-journal
 *.sqlite3
+*.csv
 tarefas.db
 batch_status.json
 

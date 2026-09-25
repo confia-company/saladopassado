@@ -210,6 +210,7 @@ def _snapshot_user_credentials(user: dict) -> dict:
         "auth_token": user.get("auth_token"),
         "nick": user.get("nick"),
         "room_name": user.get("room_name", ""),
+        "task_rooms": dict(user.get("task_rooms", {})),
         "apply_times": dict(user.get("apply_times", {})),
         "active_answer_ids": dict(user.get("active_answer_ids", {})),
     }
@@ -370,6 +371,7 @@ async def login(req: LoginRequest, response: Response):
             "auth_token": auth_token,
             "nick": nick,
             "room_name": "",
+            "task_rooms": {},
             "apply_times": {},
             "active_answer_ids": {},
         }
@@ -444,6 +446,7 @@ async def list_tasks(user: dict = Depends(get_current_user)):
             raise HTTPException(status_code=502, detail="Erro ao consultar salas do aluno.")
 
         rooms = resp_rooms.json().get("rooms", [])
+        room_names = {r.get("name") for r in rooms if r.get("name")}
         if rooms:
             user["room_name"] = rooms[0].get("name", user.get("room_name", ""))
 
@@ -473,6 +476,15 @@ async def list_tasks(user: dict = Depends(get_current_user)):
         tasks_raw = _merge_todo_pages(tasks_pages)
         essays_raw = _merge_todo_pages(essays_pages)
 
+        # Apply must use the room the task was published to; rooms[0] returns
+        # 403 {"field":"task","cause":"denied"} for tasks from other rooms.
+        task_rooms = user.setdefault("task_rooms", {})
+        for t in tasks_raw + essays_raw:
+            tid = t.get("id")
+            troom = t.get("publication_target")
+            if tid and troom in room_names:
+                task_rooms[int(tid)] = troom
+
         tasks_pending = [t for t in tasks_raw if t.get("answer_status") not in ("finished", "submitted")]
         essays_pending = [t for t in essays_raw if t.get("answer_status") not in ("finished", "submitted")]
 
@@ -481,22 +493,38 @@ async def list_tasks(user: dict = Depends(get_current_user)):
         "essays": essays_pending
     }
 
-async def _discover_task_answer_id(client, headers_tms: dict, targets_query: str, task_id: int) -> Optional[int]:
-    """Find answer_id for a draft task by scanning todo draft pages (expired + fresh)."""
+async def _discover_task_meta(client, headers_tms: dict, targets_query: str, task_id: int) -> tuple[Optional[str], Optional[int]]:
+    """Find a task's publication room and draft answer_id by scanning todo pages.
+
+    The same task can be listed as fresh/pending or as a draft, so both plain
+    and draft-filtered pages are scanned (fresh + expired).
+    """
+    room: Optional[str] = None
+    answer_id: Optional[int] = None
+
+    async def scan(is_essay: bool, expired_only: bool, filter_expired: bool, statuses):
+        nonlocal room, answer_id
+        page = await _fetch_todo_page(
+            client, headers_tms, targets_query, is_essay=is_essay,
+            expired_only=expired_only, filter_expired=filter_expired,
+            answer_statuses=statuses,
+        )
+        for t in page:
+            if t.get("id") != task_id:
+                continue
+            if not room and t.get("publication_target"):
+                room = t["publication_target"]
+            if not answer_id and t.get("answer_id"):
+                try:
+                    answer_id = int(t["answer_id"])
+                except Exception:
+                    answer_id = t["answer_id"]
+
     for is_essay in (False, True):
-        for expired_only, filter_expired in ((False, True), (True, False)):
-            page = await _fetch_todo_page(
-                client, headers_tms, targets_query, is_essay=is_essay,
-                expired_only=expired_only, filter_expired=filter_expired,
-                answer_statuses=["draft"],
-            )
-            for t in page:
-                if t.get("id") == task_id and t.get("answer_id"):
-                    try:
-                        return int(t["answer_id"])
-                    except Exception:
-                        return t["answer_id"]
-    return None
+        await scan(is_essay, False, True, None)
+        await scan(is_essay, False, True, ["draft"])
+        await scan(is_essay, True, False, ["draft"])
+    return room, answer_id
 
 @app.get("/api/task/{task_id}")
 async def get_task_detail(task_id: int, answer_id: Optional[int] = None, user: dict = Depends(get_current_user)):
@@ -513,7 +541,7 @@ async def get_task_detail(task_id: int, answer_id: Optional[int] = None, user: d
         "sec-ch-ua-platform": fp["sec-ch-ua-platform"],
     }
 
-    room_name = user.get("room_name", "")
+    room_name = user.get("task_rooms", {}).get(task_id) or user.get("room_name", "")
     resolved_answer_id = answer_id or user.get("active_answer_ids", {}).get(task_id)
 
     async with HttpCloakClient(timeout=30.0) as client:
@@ -525,29 +553,33 @@ async def get_task_detail(task_id: int, answer_id: Optional[int] = None, user: d
                 task_data = _decode_apply_response(resp)
             except Exception:
                 task_data = None
-        needs_discovery = (
+        # 403 {"field":"task","cause":"denied"} means the task belongs to a room
+        # other than the one used (the official client opens it from its room).
+        room_denied = resp.status_code == 403 and "captcha" not in (resp.text or "").lower()
+        needs_discovery = room_denied or (
             not resolved_answer_id
             and (resp.status_code == 400 or (task_data is not None and task_data.get("answer") is None))
         )
         if needs_discovery:
             # Short apply loses the draft (answer=None) and the later PUT/POST fails
-            # with 400. Discover answer_id via todo and retry in HAR format.
+            # with 400. Discover the task's room/answer_id via todo and retry.
             try:
                 url_rooms = f"{IPTV_BASE_URL}/room/user?list_all=true&with_cards=true"
                 resp_rooms = await client.get(url_rooms, headers=headers_tms)
                 rooms = resp_rooms.json().get("rooms", []) if resp_rooms.status_code == 200 else []
-                if rooms:
-                    user["room_name"] = rooms[0].get("name", room_name)
-                    room_name = user["room_name"]
                 targets_query = _tms_targets_query(rooms, user.get("nick", ""))
-                found = await _discover_task_answer_id(client, headers_tms, targets_query, task_id)
-                if found:
-                    resolved_answer_id = found
+                found_room, found_answer_id = await _discover_task_meta(client, headers_tms, targets_query, task_id)
+                if found_room:
+                    room_name = found_room
+                    user.setdefault("task_rooms", {})[task_id] = found_room
+                if found_answer_id and not resolved_answer_id:
+                    resolved_answer_id = found_answer_id
+                if found_room or found_answer_id:
                     url_apply = _build_apply_url(task_id, room_name, resolved_answer_id)
                     resp = await tms_apply_with_captcha(client, url_apply, headers_tms, task_id)
                     task_data = None
             except Exception as e:
-                logger.warning(f"[task-detail] answer discovery failed for {task_id}: {e}")
+                logger.warning(f"[task-detail] task meta discovery failed for {task_id}: {e}")
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail=f"Erro ao abrir tarefa (HTTP {resp.status_code})")
 
@@ -601,7 +633,7 @@ async def submit_task(task_id: int, req: SubmitRequest, user: dict = Depends(get
     elif duration < 60.0:
         duration = 60.0 + random.uniform(5.0, 30.0)
 
-    room_name = user.get("room_name", "")
+    room_name = user.get("task_rooms", {}).get(task_id) or user.get("room_name", "")
     answer_id = req.answer_id or user.get("active_answer_ids", {}).get(task_id)
 
     submit_status = "draft" if is_essay else "submitted"
@@ -834,6 +866,43 @@ async def start_tasks_batch_solve(req: TaskBatchSolveRequest, user: dict = Depen
     if not req.task_ids:
         raise HTTPException(status_code=400, detail="Nenhuma tarefa selecionada.")
 
+    seen_ids: set[int] = set()
+    task_ids: list[int] = []
+    for tid in req.task_ids:
+        try:
+            tid_int = int(tid)
+        except Exception:
+            continue
+        if tid_int not in seen_ids:
+            seen_ids.add(tid_int)
+            task_ids.append(tid_int)
+    if not task_ids:
+        raise HTTPException(status_code=400, detail="Nenhuma tarefa selecionada.")
+
+    # A task already in flight in another active batch cannot join a new one.
+    busy: dict[int, str] = {}
+    for b in _task_batches.values():
+        if b.get("username") != user["username"]:
+            continue
+        if b.get("status") not in ("running", "queued"):
+            continue
+        for tid, tinfo in (b.get("tasks") or {}).items():
+            if (tinfo or {}).get("status") in ("queued", "resolving_ai", "waiting_delay", "submitting"):
+                try:
+                    busy[int(tid)] = b.get("id")
+                except Exception:
+                    pass
+    conflicts = [tid for tid in task_ids if tid in busy]
+    if conflicts:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Tarefa(s) já em execução em outro lote: "
+                + ", ".join(str(t) for t in conflicts)
+                + ". Aguarde concluir ou pare o lote."
+            ),
+        )
+
     batch_id = uuid.uuid4().hex
     tasks_map = {
         tid: {
@@ -845,13 +914,13 @@ async def start_tasks_batch_solve(req: TaskBatchSolveRequest, user: dict = Depen
             "score": None,
             "message": "Aguardando início..."
         }
-        for tid in req.task_ids
+        for tid in task_ids
     }
 
     batch = {
         "id": batch_id,
         "username": user["username"],
-        "total": len(req.task_ids),
+        "total": len(task_ids),
         "completed_count": 0,
         "status": "running",
         "created_at": time.time(),
@@ -860,14 +929,14 @@ async def start_tasks_batch_solve(req: TaskBatchSolveRequest, user: dict = Depen
     _task_batches[batch_id] = batch
 
     user_snapshot = _snapshot_user_credentials(user)
-    for tid in req.task_ids:
+    for tid in task_ids:
         asyncio.create_task(_solve_single_task_worker(batch_id, tid, user_snapshot, req.min_time, req.max_time))
 
     return {
         "success": True,
         "batch_id": batch_id,
-        "total": len(req.task_ids),
-        "message": f"Iniciadas {len(req.task_ids)} tarefas em paralelo com resolução por IA e delay humanizado."
+        "total": len(task_ids),
+        "message": f"Iniciadas {len(task_ids)} tarefas em paralelo com resolução por IA e delay humanizado."
     }
 
 @app.get("/api/tasks/batch/{batch_id}")
@@ -878,6 +947,14 @@ async def get_tasks_batch_status(batch_id: str, user: dict = Depends(get_current
     if batch.get("username") != user["username"]:
         raise HTTPException(status_code=403, detail="Não autorizado")
     return {"success": True, "batch": batch}
+
+@app.get("/api/tasks/batches")
+async def list_tasks_batches(user: dict = Depends(get_current_user)):
+    """All batches of the current user (newest first) so the UI can track several in parallel."""
+    username = user["username"]
+    user_batches = [b for b in _task_batches.values() if b.get("username") == username]
+    user_batches.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return {"success": True, "batches": user_batches}
 
 @app.get("/api/tasks/active-batch")
 async def get_active_tasks_batch(user: dict = Depends(get_current_user)):

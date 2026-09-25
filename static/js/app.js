@@ -19,7 +19,7 @@ const state = {
   selectedLeiaSPBook: null,
   isSequentialLeiaSP: false,
   selectedTaskIds: new Set(),
-  activeTaskBatch: null,
+  activeTaskBatches: {},
   taskBatchPollInterval: null,
   authSeq: 0,
 };
@@ -156,13 +156,7 @@ const el = {
   tasksSelectAll: document.getElementById('tasks-select-all'),
   tasksSelectedCount: document.getElementById('tasks-selected-count'),
   btnBatchSolveTasks: document.getElementById('btn-batch-solve-tasks'),
-  tasksBatchBanner: document.getElementById('tasks-batch-banner'),
-  tasksBatchTitle: document.getElementById('tasks-batch-title'),
-  tasksBatchStatusBadge: document.getElementById('tasks-batch-status-badge'),
-  tasksBatchProgressBar: document.getElementById('tasks-batch-progress-bar'),
-  tasksBatchCounter: document.getElementById('tasks-batch-counter'),
-  tasksBatchActiveThreads: document.getElementById('tasks-batch-active-threads'),
-  btnTasksBatchStop: document.getElementById('btn-tasks-batch-stop'),
+  tasksBatchesList: document.getElementById('tasks-batches-list'),
 };
 
 const TOAST_ICONS = {
@@ -271,7 +265,11 @@ function resetClientState() {
   state.selectedLeiaSPBook = null;
   state.isSequentialLeiaSP = false;
   state.selectedTaskIds = new Set();
-  state.activeTaskBatch = null;
+  state.activeTaskBatches = {};
+  if (state._tasksReloadT) {
+    clearTimeout(state._tasksReloadT);
+    state._tasksReloadT = null;
+  }
   if (el.inputRa) el.inputRa.value = '';
   if (el.inputDigito) el.inputDigito.value = '';
   if (el.inputUf) el.inputUf.value = 'SP';
@@ -287,7 +285,7 @@ function resetClientState() {
   if (el.leiaspLogsBox) el.leiaspLogsBox.innerHTML = '';
   if (el.essayTitleInput) el.essayTitleInput.value = '';
   if (el.essayBodyInput) el.essayBodyInput.value = '';
-  if (el.tasksBatchBanner) el.tasksBatchBanner.classList.add('hidden');
+  if (el.tasksBatchesList) el.tasksBatchesList.innerHTML = '';
   hideActiveLeiaSPBanner();
   closeModal();
   closeMatificModal();
@@ -408,9 +406,42 @@ function updateTasksSelectionUI() {
   if (el.tasksSelectedCount) el.tasksSelectedCount.textContent = `${count} selecionada(s)`;
   if (el.btnBatchSolveTasks) el.btnBatchSolveTasks.classList.toggle('hidden', count === 0);
   if (el.tasksSelectAll) {
-    const totalSelectable = state.tasks.length;
-    el.tasksSelectAll.checked = totalSelectable > 0 && count === totalSelectable;
+    const selectable = state.tasks.filter(t => !isTaskBatchInFlight(t.id));
+    el.tasksSelectAll.checked = selectable.length > 0 && selectable.every(t => state.selectedTaskIds.has(t.id));
   }
+}
+
+const TASK_BATCH_IN_FLIGHT = ['queued', 'resolving_ai', 'waiting_delay', 'submitting'];
+
+function getTaskBatchInfo(taskId) {
+  let fallback = null;
+  for (const b of Object.values(state.activeTaskBatches || {})) {
+    if (!b.tasks) continue;
+    const info = b.tasks[taskId] ?? b.tasks[String(taskId)];
+    if (!info) continue;
+    if (b.status === 'running' || b.status === 'queued') return { batch: b, info };
+    fallback = fallback || { batch: b, info };
+  }
+  return fallback;
+}
+
+function isTaskBatchInFlight(taskId) {
+  const found = getTaskBatchInfo(taskId);
+  if (!found) return false;
+  if (found.batch.status !== 'running' && found.batch.status !== 'queued') return false;
+  return TASK_BATCH_IN_FLIGHT.includes(found.info.status);
+}
+
+function taskBatchBadgeHTML(info) {
+  const spin = '<span class="spinner xs"></span>';
+  if (info.status === 'resolving_ai') return `<span class="badge badge-warning task-batch-live-badge">${spin}Fazendo...</span>`;
+  if (info.status === 'submitting') return `<span class="badge badge-warning task-batch-live-badge">${spin}Fazendo...</span>`;
+  if (info.status === 'queued') return `<span class="badge badge-neutral task-batch-live-badge">${spin}Na fila...</span>`;
+  if (info.status === 'waiting_delay') return `<span class="badge badge-indigo task-batch-live-badge">Delay (${info.remaining_seconds}s)</span>`;
+  if (info.status === 'completed') return `<span class="badge badge-success task-batch-live-badge">${info.score !== null && info.score !== undefined ? 'Nota ' + info.score : 'Concluído'}</span>`;
+  if (info.status === 'failed') return '<span class="badge badge-danger task-batch-live-badge">Falhou</span>';
+  if (info.status === 'stopped') return '<span class="badge badge-danger task-batch-live-badge">Interrompido</span>';
+  return '';
 }
 
 function renderFilteredTasks() {
@@ -444,16 +475,9 @@ function renderTaskGrid(container, items, isEssay) {
 
   container.innerHTML = items.map(item => {
     const isSelected = state.selectedTaskIds.has(item.id);
-    const batchInfo = state.activeTaskBatch && state.activeTaskBatch.tasks ? state.activeTaskBatch.tasks[item.id] : null;
-    let batchBadge = '';
-    if (batchInfo) {
-      if (batchInfo.status === 'resolving_ai') batchBadge = '<span class="badge badge-warning task-batch-live-badge">IA Resolvendo...</span>';
-      else if (batchInfo.status === 'waiting_delay') batchBadge = `<span class="badge badge-indigo task-batch-live-badge">Delay (${batchInfo.remaining_seconds}s)</span>`;
-      else if (batchInfo.status === 'submitting') batchBadge = '<span class="badge badge-warning task-batch-live-badge">Enviando...</span>';
-      else if (batchInfo.status === 'completed') batchBadge = `<span class="badge badge-success task-batch-live-badge">${batchInfo.score !== null && batchInfo.score !== undefined ? 'Nota ' + batchInfo.score : 'Concluído'}</span>`;
-      else if (batchInfo.status === 'failed') batchBadge = '<span class="badge badge-danger task-batch-live-badge">Falhou</span>';
-      else if (batchInfo.status === 'stopped') batchBadge = '<span class="badge badge-danger task-batch-live-badge">Interrompido</span>';
-    }
+    const batchFound = getTaskBatchInfo(item.id);
+    const batchBadge = batchFound ? taskBatchBadgeHTML(batchFound.info) : '';
+    const inFlight = isTaskBatchInFlight(item.id);
 
     const isDraft = item.answer_status === 'draft' || (item.answer_id !== null && item.answer_id !== undefined);
     const isExpired = item.task_expired === true || item.expired === true;
@@ -465,7 +489,7 @@ function renderTaskGrid(container, items, isEssay) {
       <div class="task-card glass-panel ${isSelected ? 'task-selected' : ''}" data-id="${item.id}" data-essay="${isEssay}">
         <div class="task-card-header">
           <div class="task-card-header-left">
-            ${!isEssay ? `<input type="checkbox" class="task-select-checkbox" data-id="${item.id}" ${isSelected ? 'checked' : ''}>` : ''}
+            ${!isEssay ? `<input type="checkbox" class="task-select-checkbox" data-id="${item.id}" ${isSelected ? 'checked' : ''} ${inFlight ? 'disabled title="Já está em execução em um lote"' : ''}>` : ''}
             <span class="badge ${isEssay ? 'badge-purple' : 'badge-indigo'}">${isEssay ? 'Redação' : 'Tarefa'}</span>
             ${draftBadge}${expiredBadge}
           </div>
@@ -478,8 +502,8 @@ function renderTaskGrid(container, items, isEssay) {
         <p class="task-snippet">${stripHtml(item.description || 'Sem descrição informada.')}</p>
         <div class="task-footer">
           <span class="task-meta">${item.questions_count || item.question_count ? (item.questions_count || item.question_count) + ' questões' : ''}</span>
-          <button class="btn btn-primary btn-sm btn-open-task" data-id="${item.id}" data-essay="${isEssay}" data-answer-id="${answerId}">
-            <span>${isDraft ? 'Continuar Rascunho' : 'Resolver com IA'}</span>
+          <button class="btn btn-primary btn-sm btn-open-task" data-id="${item.id}" data-essay="${isEssay}" data-answer-id="${answerId}" ${inFlight ? 'disabled' : ''}>
+            <span>${inFlight ? 'Fazendo...' : (isDraft ? 'Continuar Rascunho' : 'Resolver com IA')}</span>
           </button>
         </div>
       </div>
@@ -519,7 +543,15 @@ async function startTasksBatchSolve() {
     return;
   }
 
-  const taskIds = Array.from(state.selectedTaskIds);
+  const picked = Array.from(state.selectedTaskIds);
+  const busy = picked.filter(id => isTaskBatchInFlight(id));
+  const taskIds = picked.filter(id => !isTaskBatchInFlight(id));
+  if (busy.length > 0) {
+    showToast(`${busy.length} tarefa(s) já estão em execução em outro lote e foram ignoradas.`, 'warning');
+  }
+  if (taskIds.length === 0) {
+    return;
+  }
   if (el.btnBatchSolveTasks) el.btnBatchSolveTasks.disabled = true;
 
   try {
@@ -533,11 +565,12 @@ async function startTasksBatchSolve() {
     if (!res.ok) throw new Error(data.detail || 'Falha ao iniciar execução em lote.');
 
     showToast(data.message || 'Tarefas iniciadas em paralelo com delay humanizado!', 'success');
-    state.selectedTaskIds.clear();
+    for (const id of taskIds) state.selectedTaskIds.delete(id);
     updateTasksSelectionUI();
     renderFilteredTasks();
 
-    pollTasksBatch(data.batch_id);
+    ensureTaskBatchesPolling();
+    refreshTaskBatches(state.authSeq);
   } catch (err) {
     showToast(err.message, 'error');
   } finally {
@@ -545,73 +578,122 @@ async function startTasksBatchSolve() {
   }
 }
 
-function pollTasksBatch(batchId) {
-  if (state.taskBatchPollInterval) {
-    clearInterval(state.taskBatchPollInterval);
-  }
+function ensureTaskBatchesPolling() {
+  if (state.taskBatchPollInterval) return;
   const mySeq = state.authSeq;
-
   state.taskBatchPollInterval = setInterval(async () => {
     if (mySeq !== state.authSeq) {
       clearInterval(state.taskBatchPollInterval);
       state.taskBatchPollInterval = null;
       return;
     }
-    try {
-      const res = await fetch(`/api/tasks/batch/${batchId}`);
-      if (!res.ok) {
-        clearInterval(state.taskBatchPollInterval);
-        state.taskBatchPollInterval = null;
-        return;
-      }
-
-      const data = await res.json();
-      const batch = data.batch;
-      if (!batch) return;
-
-      state.activeTaskBatch = batch;
-      renderActiveTasksBatchBanner(batch);
-      updateTaskCardBadges(batch);
-
-      if (batch.status === 'completed' || batch.status === 'stopped' || batch.status === 'failed') {
-        clearInterval(state.taskBatchPollInterval);
-        state.taskBatchPollInterval = null;
-
-        if (batch.status === 'completed') {
-          showToast('Todas as tarefas do lote foram concluídas com sucesso!', 'success');
-        } else if (batch.status === 'stopped') {
-          showToast('Execução do lote de tarefas interrompida.', 'info');
-        }
-
-        setTimeout(() => {
-          if (el.tasksBatchBanner) el.tasksBatchBanner.classList.add('hidden');
-          loadTasks();
-        }, 3500);
-      }
-    } catch (err) {}
+    await refreshTaskBatches(mySeq);
   }, 1000);
 }
 
-function renderActiveTasksBatchBanner(batch) {
-  if (!el.tasksBatchBanner || !batch) return;
-  el.tasksBatchBanner.classList.remove('hidden');
+function scheduleTasksReload() {
+  if (state._tasksReloadT) return;
+  state._tasksReloadT = setTimeout(() => {
+    state._tasksReloadT = null;
+    loadTasks();
+  }, 3500);
+}
 
-  const total = batch.total || 0;
-  const completed = batch.completed_count || 0;
-  const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
-  const runningCount = Object.values(batch.tasks || {}).filter(t => t.status === 'resolving_ai' || t.status === 'waiting_delay' || t.status === 'submitting').length;
+async function refreshTaskBatches(mySeq) {
+  try {
+    const res = await fetch('/api/tasks/batches');
+    if (mySeq !== state.authSeq) return;
+    if (!res.ok) return;
+    const data = await res.json();
+    const batches = data.batches || [];
+    const now = Date.now();
+    const next = {};
 
-  if (el.tasksBatchTitle) el.tasksBatchTitle.textContent = `Executando ${total} Tarefas em Paralelo (${runningCount} threads ativas)`;
-  if (el.tasksBatchProgressBar) el.tasksBatchProgressBar.style.width = `${percent}%`;
-  if (el.tasksBatchCounter) el.tasksBatchCounter.textContent = `${completed} / ${total} concluídas (${percent}%)`;
-  if (el.tasksBatchActiveThreads) el.tasksBatchActiveThreads.textContent = `${runningCount} em processamento`;
+    for (const b of batches) {
+      const prev = state.activeTaskBatches[b.id];
+      const isActive = b.status === 'running' || b.status === 'queued';
+      if (isActive) {
+        next[b.id] = b;
+      } else if (prev && (prev.status === 'running' || prev.status === 'queued')) {
+        if (b.status === 'completed') {
+          showToast('Lote de tarefas concluído!', 'success');
+        } else if (b.status === 'stopped') {
+          showToast('Lote de tarefas interrompido.', 'info');
+        } else {
+          showToast(`Lote finalizado: ${b.status}.`, 'info');
+        }
+        next[b.id] = { ...b, _dismissAt: now + 3500 };
+        scheduleTasksReload();
+      } else if (prev && prev._dismissAt && prev._dismissAt > now) {
+        next[b.id] = prev;
+      }
+    }
 
-  const isStopped = batch.status === 'stopped';
-  const isDone = batch.status === 'completed';
+    state.activeTaskBatches = next;
+    renderTasksBatchesBanners();
+    updateAllTaskCardBadges();
 
-  if (el.tasksBatchStatusBadge) {
-    el.tasksBatchStatusBadge.textContent = isDone ? 'Concluído' : (isStopped ? 'Interrompido' : 'Em andamento');
-    el.tasksBatchStatusBadge.className = `badge ${isDone ? 'badge-success' : (isStopped ? 'badge-danger' : 'badge-indigo')}`;
+    if (Object.keys(next).length === 0 && state.taskBatchPollInterval) {
+      clearInterval(state.taskBatchPollInterval);
+      state.taskBatchPollInterval = null;
+    }
+  } catch (err) {}
+}
+
+function renderTasksBatchesBanners() {
+  const container = el.tasksBatchesList;
+  if (!container) return;
+  const batches = Object.values(state.activeTaskBatches);
+  if (batches.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  container.innerHTML = batches.map(b => {
+    const total = b.total || 0;
+    const completed = b.completed_count || 0;
+    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+    const runningCount = Object.values(b.tasks || {}).filter(t => TASK_BATCH_IN_FLIGHT.includes(t.status)).length;
+
+    const isDone = b.status === 'completed';
+    const isStopped = b.status === 'stopped';
+    const isFailed = b.status === 'failed';
+    const statusText = isDone ? 'Concluído' : (isStopped ? 'Interrompido' : (isFailed ? 'Falha' : 'Em andamento'));
+    const statusClass = isDone ? 'badge-success' : ((isStopped || isFailed) ? 'badge-danger' : 'badge-indigo');
+
+    return `
+      <div class="tasks-batch-banner glass-panel" data-batch-id="${b.id}">
+        <div class="batch-banner-main">
+          <div class="batch-banner-header">
+            <div class="batch-banner-title-group">
+              <span class="status-indicator-dot"></span>
+              <strong>Lote com ${total} tarefa(s)${runningCount > 0 ? ` (${runningCount} fazendo...)` : ''}</strong>
+            </div>
+            <span class="badge ${statusClass}">${statusText}</span>
+          </div>
+          <div class="batch-progress-bar-bg">
+            <div class="batch-progress-bar" style="width: ${percent}%;"></div>
+          </div>
+          <div class="batch-banner-meta">
+            <span>${completed} / ${total} concluídas (${percent}%)</span>
+            <span>${runningCount} em processamento</span>
+          </div>
+        </div>
+        <div class="batch-banner-actions">
+          ${(!isDone && !isStopped && !isFailed) ? `
+          <button class="btn btn-danger btn-sm" data-stop-batch="${b.id}" title="Interromper este lote">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"></rect></svg>
+            <span>Parar</span>
+          </button>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function updateAllTaskCardBadges() {
+  for (const b of Object.values(state.activeTaskBatches || {})) {
+    updateTaskCardBadges(b);
   }
 }
 
@@ -623,31 +705,21 @@ function updateTaskCardBadges(batch) {
     const badgeContainer = card.querySelector('.task-card-header-right');
     if (!badgeContainer) continue;
 
+    const html = taskBatchBadgeHTML(tinfo);
     let existingBadge = badgeContainer.querySelector('.task-batch-live-badge');
+    if (!html) {
+      if (existingBadge) existingBadge.remove();
+      continue;
+    }
     if (!existingBadge) {
       existingBadge = document.createElement('span');
-      existingBadge.className = 'badge task-batch-live-badge';
       badgeContainer.insertBefore(existingBadge, badgeContainer.firstChild);
     }
-
-    if (tinfo.status === 'resolving_ai') {
-      existingBadge.className = 'badge badge-warning task-batch-live-badge';
-      existingBadge.textContent = 'IA Resolvendo...';
-    } else if (tinfo.status === 'waiting_delay') {
-      existingBadge.className = 'badge badge-indigo task-batch-live-badge';
-      existingBadge.textContent = `Delay (${tinfo.remaining_seconds}s)`;
-    } else if (tinfo.status === 'submitting') {
-      existingBadge.className = 'badge badge-warning task-batch-live-badge';
-      existingBadge.textContent = 'Enviando...';
-    } else if (tinfo.status === 'completed') {
-      existingBadge.className = 'badge badge-success task-batch-live-badge';
-      existingBadge.textContent = tinfo.score !== null && tinfo.score !== undefined ? `Nota ${tinfo.score}` : 'Concluído';
-    } else if (tinfo.status === 'failed') {
-      existingBadge.className = 'badge badge-danger task-batch-live-badge';
-      existingBadge.textContent = 'Falhou';
-    } else if (tinfo.status === 'stopped') {
-      existingBadge.className = 'badge badge-danger task-batch-live-badge';
-      existingBadge.textContent = 'Interrompido';
+    const tmp = document.createElement('span');
+    tmp.innerHTML = html;
+    const fresh = tmp.firstElementChild;
+    if (fresh && existingBadge.outerHTML !== fresh.outerHTML) {
+      existingBadge.replaceWith(fresh);
     }
   }
 }
@@ -655,24 +727,34 @@ function updateTaskCardBadges(batch) {
 async function checkActiveTasksBatch() {
   const mySeq = state.authSeq;
   try {
-    const res = await fetch('/api/tasks/active-batch');
+    const res = await fetch('/api/tasks/batches');
     if (mySeq !== state.authSeq) return;
     if (!res.ok) return;
     const data = await res.json();
     if (mySeq !== state.authSeq) return;
-    if (data.active && data.batch) {
-      state.activeTaskBatch = data.batch;
-      renderActiveTasksBatchBanner(data.batch);
-      pollTasksBatch(data.batch.id);
+    const batches = (data.batches || []).filter(b => b.status === 'running' || b.status === 'queued');
+    if (batches.length > 0) {
+      const next = {};
+      for (const b of batches) next[b.id] = b;
+      state.activeTaskBatches = next;
+      renderTasksBatchesBanners();
+      renderFilteredTasks();
+      ensureTaskBatchesPolling();
     }
   } catch (err) {}
 }
 
-async function stopTasksBatch() {
-  if (!state.activeTaskBatch) return;
+async function stopTasksBatch(batchId) {
+  const target = batchId || Object.keys(state.activeTaskBatches || {})[0];
+  if (!target) return;
   try {
-    await fetch(`/api/tasks/batch/${state.activeTaskBatch.id}/stop`, { method: 'POST' });
+    const res = await fetch(`/api/tasks/batch/${target}/stop`, { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Falha ao parar o lote.');
+    }
     showToast('Comando de cancelamento do lote enviado.', 'info');
+    refreshTaskBatches(state.authSeq);
   } catch (err) {
     showToast(err.message, 'error');
   }
@@ -1822,13 +1904,18 @@ document.addEventListener('DOMContentLoaded', () => {
       const checked = e.target.checked;
       state.selectedTaskIds.clear();
       if (checked) {
-        state.tasks.forEach(t => state.selectedTaskIds.add(t.id));
+        state.tasks.forEach(t => {
+          if (!isTaskBatchInFlight(t.id)) state.selectedTaskIds.add(t.id);
+        });
       }
       renderFilteredTasks();
     });
   }
   if (el.btnBatchSolveTasks) el.btnBatchSolveTasks.addEventListener('click', startTasksBatchSolve);
-  if (el.btnTasksBatchStop) el.btnTasksBatchStop.addEventListener('click', stopTasksBatch);
+  if (el.tasksBatchesList) el.tasksBatchesList.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-stop-batch]');
+    if (btn) stopTasksBatch(btn.dataset.stopBatch);
+  });
 
   if (el.btnRefreshLeiaSP) el.btnRefreshLeiaSP.addEventListener('click', loadLeiaSPData);
   if (el.btnLeiaSPSeq) el.btnLeiaSPSeq.addEventListener('click', () => openLeiaSPModal(null, true));
