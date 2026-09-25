@@ -962,6 +962,17 @@ textarea:focus,
   font-size: 0.875rem;
 }
 
+.text-answer-input {
+  width: 100%;
+  min-height: 90px;
+  margin-top: 0.5rem;
+  resize: vertical;
+  line-height: 1.6;
+  font-family: inherit;
+  font-size: 0.875rem;
+  box-sizing: border-box;
+}
+
 /* Modal Footer */
 .modal-footer {
   display: flex;

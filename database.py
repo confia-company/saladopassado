@@ -120,7 +120,7 @@ def resolve_cached_answers(task_data: dict, task_id: int) -> tuple[dict, bool]:
             if qid in resolved:
                 continue
             q_type = q.get("type")
-            if q_type in ("text_ai", "essay"):
+            if q_type in ("text_ai", "text", "essay"):
                 continue
             q_hash = make_question_hash(q_type, q.get("statement", ""), q.get("options"))
             
@@ -176,7 +176,7 @@ def save_question_level_ai_answers(task_data: dict, answers: dict):
             for q in questions:
                 q_id = str(q.get("id"))
                 q_type = q.get("type")
-                if q_type in ("info", "section", "text_ai", "essay"):
+                if q_type in ("info", "section", "text_ai", "text", "essay"):
                     continue
                 if q_id in answers:
                     q_hash = make_question_hash(q_type, q.get("statement", ""), q.get("options"))

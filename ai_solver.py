@@ -99,6 +99,40 @@ async def _download_media_as_base64(url: str) -> Tuple[str, str]:
             data_b64 = base64.b64encode(resp.content).decode("utf-8")
             return data_b64, "image/png"
 
+async def _download_pdf_text(url: str) -> str:
+    """Download a PDF attachment and return its extracted text (best effort)."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        logger.warning("[AI Solver] pypdf não instalado; PDF anexo ignorado.")
+        return ""
+
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            raise Exception(f"Failed to download PDF {url}: HTTP {resp.status_code}")
+
+    reader = PdfReader(io.BytesIO(resp.content))
+    pages = [(page.extract_text() or "") for page in reader.pages]
+    return "\n".join(pages).strip()
+
+async def _attach_pdf_texts(task_data: dict):
+    """Inline the text of PDF attachments into question statements.
+
+    The AI only receives images, so questions whose material lives in a PDF
+    (media_type == "pdf", ex: tipo "text") would be answered blindly.
+    """
+    for q in task_data.get("questions", []) or []:
+        if q.get("media_type") != "pdf" or not q.get("media_url"):
+            continue
+        try:
+            text = await _download_pdf_text(q["media_url"])
+        except Exception as e:
+            logger.warning(f"[AI Solver] Falha ao extrair PDF {q.get('media_url')}: {e}")
+            continue
+        if text:
+            q["statement"] = f"{q.get('statement') or ''}\n[CONTEÚDO DO PDF ANEXO]\n{text[:12000]}"
+
 def _build_essay_ai_prompt(task_data: dict) -> str:
     title = task_data.get("title", "")
     desc = task_data.get("description", "")
@@ -181,7 +215,7 @@ def _build_ai_prompt(task_data: dict) -> str:
             questions_section += f"Banco de palavras disponíveis: {', '.join(words)}\n"
             questions_section += "Instrução: Selecione e ordene APENAS as palavras necessárias para formar a frase com sentido semântico completo e correto. ATENÇÃO: Podem existir palavras distratoras/extras no banco que NÃO devem ser incluídas na resposta. Ignore as palavras que sobrarem.\n"
 
-        elif q_type == "text_ai" and isinstance(options, dict):
+        elif q_type in ("text_ai", "text") and isinstance(options, dict):
             kw = options.get("ai_grading_keywords", [])
             if kw:
                 questions_section += f"Palavras-chave obrigatórias a incluir: {', '.join(kw)}\n"
@@ -564,7 +598,7 @@ def _normalize_ai_answers(raw_parsed: any, task_data: dict) -> dict:
                 ans_dict = {rk: (idx == 0) for idx, rk in enumerate(real_keys)}
             normalized[str(q_id)] = {"question_id": safe_qid, "question_type": q_type, "answer": ans_dict}
 
-        elif q_type == "text_ai":
+        elif q_type in ("text_ai", "text"):
             if isinstance(ans_val, dict):
                 text_str = str(ans_val.get("0") or next(iter(ans_val.values()), "")).strip()
             else:
@@ -607,7 +641,7 @@ def _is_question_answer_valid(qid: str, q_type: str, answers_dict: dict) -> bool
         return isinstance(ans, dict) and len(ans) > 0
     elif q_type in ("fill-words", "cloud", "order-sentences"):
         return isinstance(ans, list) and len(ans) > 0 and all(bool(str(x).strip()) for x in ans)
-    elif q_type == "text_ai":
+    elif q_type in ("text_ai", "text"):
         return isinstance(ans, dict) and bool(str(ans.get("0", "")).strip())
     elif q_type == "fill-letters":
         return isinstance(ans, str) and bool(ans.strip())
@@ -653,11 +687,11 @@ async def _solve_question_individually(q: dict, task_title: str, task_desc: str)
         opts_text = f"Palavras disponíveis: {', '.join(opts.get('words', []))}\n"
         format_instr = '{"palavras": ["Palavra1", "Palavra2", ...]}'
 
-    elif q_type == "text_ai" and isinstance(opts, dict):
+    elif q_type in ("text_ai", "text") and isinstance(opts, dict):
         kw = opts.get("ai_grading_keywords", [])
         if kw:
             opts_text = f"Palavras-chave obrigatórias: {', '.join(kw)}\n"
-        format_instr = '{"0": "texto dissertativo completo"}'
+        format_instr = '{"0": "resposta em texto"}'
     else:
         format_instr = "{}"
 
@@ -693,6 +727,8 @@ async def resolve_task_answers(task_data: dict, task_id: int) -> dict:
             "model_used": "db-cache",
             "raw": ""
         }
+
+    await _attach_pdf_texts(task_data)
 
     images = _extract_images_from_task(task_data)
     questions = task_data.get("questions", [])

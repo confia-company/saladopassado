@@ -1360,6 +1360,21 @@ function renderQuestions(questions) {
       `;
     }
 
+    if (qType === 'text' || qType === 'text_ai') {
+      const opts = q.options || {};
+      const maxLen = opts.max_text_count || 2000;
+      return `
+        <div class="question-block glass-panel" id="question-${q.id}">
+          <div class="question-header">
+            <span class="question-number">Questão ${idx + 1}</span>
+            <span class="badge badge-neutral">${qType}</span>
+          </div>
+          <div class="question-statement">${q.statement || ''}</div>
+          <textarea class="text-answer-input" data-qid="${q.id}" maxlength="${maxLen}" placeholder="Escreva sua resposta (até ${maxLen} caracteres)..."></textarea>
+        </div>
+      `;
+    }
+
     const normalizedOptions = getNormalizedOptions(q);
 
     return `
@@ -1416,6 +1431,12 @@ async function handleAiFill() {
         const qElem = document.getElementById(`question-${qid}`);
         if (!qElem) continue;
         const ans = ansData.answer;
+        const textarea = qElem.querySelector('.text-answer-input');
+        if (textarea) {
+          const val = typeof ans === 'object' && ans !== null ? (ans['0'] ?? Object.values(ans)[0] ?? '') : (ans ?? '');
+          if (val) textarea.value = String(val);
+          continue;
+        }
         if (typeof ans === 'object' && ans !== null && !Array.isArray(ans)) {
           for (const [optIdx, isSelected] of Object.entries(ans)) {
             if (isSelected === true || String(isSelected).toLowerCase() === 'true') {
@@ -1457,6 +1478,18 @@ async function handleSubmit(delayed = false) {
         }
       }
     };
+  } else {
+    // Respostas de texto (text/text_ai) podem ser editadas no modal antes do envio.
+    for (const q of (state.currentTask.questions || [])) {
+      if (q.type !== 'text' && q.type !== 'text_ai') continue;
+      const ta = el.questionsContainer.querySelector(`.text-answer-input[data-qid="${q.id}"]`);
+      if (ta && ta.value.trim()) {
+        payloadAnswers = {
+          ...payloadAnswers,
+          [String(q.id)]: { question_id: q.id, question_type: q.type, answer: { '0': ta.value.trim() } }
+        };
+      }
+    }
   }
 
   if (Object.keys(payloadAnswers).length === 0) {

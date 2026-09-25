@@ -110,6 +110,7 @@ Formato esperado para cada tipo de questão:
 - "fill-words": {"question_id": ID, "question_type": "fill-words", "answer": ["palavra_lacuna_1", "palavra_lacuna_2", ...]}
 - "cloud": {"question_id": ID, "question_type": "cloud", "answer": ["Palavra1", "Palavra2", ...]} (Ordene APENAS as palavras que formam a frase com sentido semântico perfeito; ignore palavras extras/distratores que sobrarem)
 - "text_ai": {"question_id": ID, "question_type": "text_ai", "answer": {"0": "texto dissertativo completo"}}
+- "text": {"question_id": ID, "question_type": "text", "answer": {"0": "resposta em texto"}}
 - "fill-letters": {"question_id": ID, "question_type": "fill-letters", "answer": ["a", "b", "c"]} ou "palavra"
 - "order-sentences": {"question_id": ID, "question_type": "order-sentences", "answer": ["Texto exato da sentença 1", "Texto exato da sentença 2", ...]} (Ordene APENAS as sentenças que fazem sentido lógico/cronológico, descartando opções incorretas)
 
