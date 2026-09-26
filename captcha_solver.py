@@ -34,13 +34,17 @@ async def predict_captcha_answer(image_bytes: bytes, python: str = None, model: 
         with open(img_path, "wb") as f:
             f.write(image_bytes)
 
-        proc = await asyncio.to_thread(
-            subprocess.run,
-            [py_exec, CAPTCHA_PREDICT_SCRIPT, img_path, "--model", model_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                [py_exec, CAPTCHA_PREDICT_SCRIPT, img_path, "--model", model_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("predict_captcha.py excedeu o limite de 60 segundos") from e
         stdout, stderr = proc.stdout, proc.stderr
         if proc.returncode != 0:
             err = (stderr or b"").decode(errors="replace").strip()
