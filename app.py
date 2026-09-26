@@ -56,6 +56,9 @@ _matific_jobs: dict[str, dict] = {}
 _matific_batches: dict[str, dict] = {}
 
 _task_batches: dict[str, dict] = {}
+# Shared by batches and individual requests in this server process. Only task
+# preparation (opening/CAPTCHA/AI) takes a slot; delays and answer sends do not.
+_task_preparation_semaphore = asyncio.Semaphore(5)
 _leiasp_jobs: dict[str, dict] = {}
 _leiasp_locks: dict[str, asyncio.Lock] = {}
 
@@ -528,6 +531,12 @@ async def _discover_task_meta(client, headers_tms: dict, targets_query: str, tas
 
 @app.get("/api/task/{task_id}")
 async def get_task_detail(task_id: int, answer_id: Optional[int] = None, user: dict = Depends(get_current_user)):
+    async with _task_preparation_semaphore:
+        return await _get_task_detail(task_id, answer_id=answer_id, user=user)
+
+
+async def _get_task_detail(task_id: int, *, user: dict, answer_id: Optional[int] = None):
+    """Open a task while the caller holds a preparation slot."""
     fp = _get_browser_context()
     headers_tms = {
         "x-api-key": user["auth_token"],
@@ -597,12 +606,11 @@ async def get_task_detail(task_id: int, answer_id: Optional[int] = None, user: d
 
 @app.post("/api/ai-fill/{task_id}")
 async def ai_fill_task(task_id: int, user: dict = Depends(get_current_user)):
-    task_data = _task_cache.get(_task_cache_key(user, task_id))
-    if not task_data:
-        task_data = await get_task_detail(task_id, user=user)
-
-    result = await resolve_task_answers(task_data, task_id)
-    return result
+    async with _task_preparation_semaphore:
+        task_data = _task_cache.get(_task_cache_key(user, task_id))
+        if not task_data:
+            task_data = await _get_task_detail(task_id, user=user)
+        return await resolve_task_answers(task_data, task_id)
 
 @app.post("/api/task/{task_id}/submit")
 async def submit_task(task_id: int, req: SubmitRequest, user: dict = Depends(get_current_user)):
@@ -704,7 +712,8 @@ async def submit_task(task_id: int, req: SubmitRequest, user: dict = Depends(get
             "Accept": "application/json",
             "User-Agent": fp["user-agent"],
         }
-        apply_resp = await tms_apply_with_captcha(client, url_apply, headers_tms, task_id)
+        async with _task_preparation_semaphore:
+            apply_resp = await tms_apply_with_captcha(client, url_apply, headers_tms, task_id)
         if apply_resp.status_code == 200:
             try:
                 apply_data = _decode_apply_response(apply_resp)
@@ -797,14 +806,25 @@ async def _solve_single_task_worker(batch_id: str, task_id: int, user: dict, min
         return
 
     task_info = batch["tasks"][task_id]
-    task_info["status"] = "resolving_ai"
-    task_info["message"] = "Resolvendo questões com IA..."
+    task_info["status"] = "queued"
+    task_info["message"] = "Na fila para abrir a tarefa e consultar a IA..."
 
     try:
-        task_data = await get_task_detail(task_id, user=user)
-        task_info["title"] = task_data.get("title", task_info.get("title", f"Tarefa #{task_id}"))
+        async with _task_preparation_semaphore:
+            if batch.get("status") == "stopped":
+                task_info["status"] = "stopped"
+                task_info["message"] = "Execução cancelada pelo usuário."
+                return
+            task_info["status"] = "resolving_ai"
+            task_info["message"] = "Abrindo tarefa e resolvendo questões com IA..."
+            task_data = await _get_task_detail(task_id, user=user)
+            task_info["title"] = task_data.get("title", task_info.get("title", f"Tarefa #{task_id}"))
+            if batch.get("status") == "stopped":
+                task_info["status"] = "stopped"
+                task_info["message"] = "Execução cancelada pelo usuário."
+                return
+            ai_res = await resolve_task_answers(task_data, task_id)
 
-        ai_res = await resolve_task_answers(task_data, task_id)
         if not ai_res.get("success") or not ai_res.get("answers"):
             task_info["status"] = "failed"
             task_info["message"] = "IA não gerou respostas para a tarefa."
@@ -852,6 +872,10 @@ async def _solve_single_task_worker(batch_id: str, task_id: int, user: dict, min
         task_info["score"] = submit_res.get("score")
         task_info["message"] = submit_res.get("message", "Concluído com sucesso!")
 
+    except asyncio.CancelledError:
+        task_info["status"] = "stopped"
+        task_info["message"] = "Execução cancelada."
+        raise
     except Exception as e:
         task_info["status"] = "failed"
         task_info["message"] = f"Erro: {str(e)[:150]}"
@@ -912,7 +936,7 @@ async def start_tasks_batch_solve(req: TaskBatchSolveRequest, user: dict = Depen
             "remaining_seconds": 0,
             "total_seconds": 0,
             "score": None,
-            "message": "Aguardando início..."
+            "message": "Na fila para abrir a tarefa e consultar a IA..."
         }
         for tid in task_ids
     }
@@ -936,7 +960,7 @@ async def start_tasks_batch_solve(req: TaskBatchSolveRequest, user: dict = Depen
         "success": True,
         "batch_id": batch_id,
         "total": len(task_ids),
-        "message": f"Iniciadas {len(task_ids)} tarefas em paralelo com resolução por IA e delay humanizado."
+        "message": f"{len(task_ids)} tarefas na fila; até 5 em preparação simultânea."
     }
 
 @app.get("/api/tasks/batch/{batch_id}")

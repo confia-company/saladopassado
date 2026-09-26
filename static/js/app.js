@@ -167,9 +167,13 @@ const TOAST_ICONS = {
 };
 
 function showToast(message, type = 'info') {
+  if (!['success', 'error', 'warning', 'info'].includes(type)) type = 'info';
   const toast = document.createElement('div');
   toast.className = `toast ${type}`;
-  toast.innerHTML = `${TOAST_ICONS[type] || TOAST_ICONS.info}<span>${message}</span>`;
+  toast.innerHTML = TOAST_ICONS[type];
+  const text = document.createElement('span');
+  text.textContent = String(message ?? '');
+  toast.appendChild(text);
   el.toastContainer.appendChild(toast);
 
   setTimeout(() => {
@@ -181,9 +185,9 @@ function showToast(message, type = 'info') {
 
 function stripHtml(html) {
   if (!html) return '';
-  const tmp = document.createElement('div');
-  tmp.innerHTML = html;
-  return tmp.textContent || tmp.innerText || '';
+  const tmp = document.createElement('template');
+  tmp.innerHTML = sanitizeHtml(html);
+  return tmp.content.textContent || '';
 }
 
 function formatDate(isoStr) {
@@ -437,8 +441,8 @@ function taskBatchBadgeHTML(info) {
   if (info.status === 'resolving_ai') return `<span class="badge badge-warning task-batch-live-badge">${spin}Fazendo...</span>`;
   if (info.status === 'submitting') return `<span class="badge badge-warning task-batch-live-badge">${spin}Fazendo...</span>`;
   if (info.status === 'queued') return `<span class="badge badge-neutral task-batch-live-badge">${spin}Na fila...</span>`;
-  if (info.status === 'waiting_delay') return `<span class="badge badge-indigo task-batch-live-badge">Delay (${info.remaining_seconds}s)</span>`;
-  if (info.status === 'completed') return `<span class="badge badge-success task-batch-live-badge">${info.score !== null && info.score !== undefined ? 'Nota ' + info.score : 'Concluído'}</span>`;
+  if (info.status === 'waiting_delay') return `<span class="badge badge-indigo task-batch-live-badge">Delay (${escapeHtml(info.remaining_seconds)}s)</span>`;
+  if (info.status === 'completed') return `<span class="badge badge-success task-batch-live-badge">${info.score !== null && info.score !== undefined ? 'Nota ' + escapeHtml(info.score) : 'Concluído'}</span>`;
   if (info.status === 'failed') return '<span class="badge badge-danger task-batch-live-badge">Falhou</span>';
   if (info.status === 'stopped') return '<span class="badge badge-danger task-batch-live-badge">Interrompido</span>';
   return '';
@@ -486,23 +490,23 @@ function renderTaskGrid(container, items, isEssay) {
     const answerId = item.answer_id || (item.answer && item.answer.id) || '';
 
     return `
-      <div class="task-card glass-panel ${isSelected ? 'task-selected' : ''}" data-id="${item.id}" data-essay="${isEssay}">
+      <div class="task-card glass-panel ${isSelected ? 'task-selected' : ''}" data-id="${escapeHtml(item.id)}" data-essay="${isEssay}">
         <div class="task-card-header">
           <div class="task-card-header-left">
-            ${!isEssay ? `<input type="checkbox" class="task-select-checkbox" data-id="${item.id}" ${isSelected ? 'checked' : ''} ${inFlight ? 'disabled title="Já está em execução em um lote"' : ''}>` : ''}
+            ${!isEssay ? `<input type="checkbox" class="task-select-checkbox" data-id="${escapeHtml(item.id)}" ${isSelected ? 'checked' : ''} ${inFlight ? 'disabled title="Já está em execução em um lote"' : ''}>` : ''}
             <span class="badge ${isEssay ? 'badge-purple' : 'badge-indigo'}">${isEssay ? 'Redação' : 'Tarefa'}</span>
             ${draftBadge}${expiredBadge}
           </div>
           <div class="task-card-header-right">
             ${batchBadge}
-            <span class="task-date">${formatDate(item.expire_at || item.due_date)}</span>
+            <span class="task-date">${escapeHtml(formatDate(item.expire_at || item.due_date))}</span>
           </div>
         </div>
-        <h3 class="task-title" title="${item.title}">${item.title}</h3>
-        <p class="task-snippet">${stripHtml(item.description || 'Sem descrição informada.')}</p>
+        <h3 class="task-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</h3>
+        <p class="task-snippet">${escapeHtml(stripHtml(item.description || 'Sem descrição informada.'))}</p>
         <div class="task-footer">
-          <span class="task-meta">${item.questions_count || item.question_count ? (item.questions_count || item.question_count) + ' questões' : ''}</span>
-          <button class="btn btn-primary btn-sm btn-open-task" data-id="${item.id}" data-essay="${isEssay}" data-answer-id="${answerId}" ${inFlight ? 'disabled' : ''}>
+          <span class="task-meta">${escapeHtml(item.questions_count || item.question_count ? (item.questions_count || item.question_count) + ' questões' : '')}</span>
+          <button class="btn btn-primary btn-sm btn-open-task" data-id="${escapeHtml(item.id)}" data-essay="${isEssay}" data-answer-id="${escapeHtml(answerId)}" ${inFlight ? 'disabled' : ''}>
             <span>${inFlight ? 'Fazendo...' : (isDraft ? 'Continuar Rascunho' : 'Resolver com IA')}</span>
           </button>
         </div>
@@ -650,9 +654,9 @@ function renderTasksBatchesBanners() {
   }
 
   container.innerHTML = batches.map(b => {
-    const total = b.total || 0;
-    const completed = b.completed_count || 0;
-    const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
+    const total = Math.max(0, finiteNumber(b.total));
+    const completed = Math.max(0, finiteNumber(b.completed_count));
+    const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
     const runningCount = Object.values(b.tasks || {}).filter(t => TASK_BATCH_IN_FLIGHT.includes(t.status)).length;
 
     const isDone = b.status === 'completed';
@@ -662,7 +666,7 @@ function renderTasksBatchesBanners() {
     const statusClass = isDone ? 'badge-success' : ((isStopped || isFailed) ? 'badge-danger' : 'badge-indigo');
 
     return `
-      <div class="tasks-batch-banner glass-panel" data-batch-id="${b.id}">
+      <div class="tasks-batch-banner glass-panel" data-batch-id="${escapeHtml(b.id)}">
         <div class="batch-banner-main">
           <div class="batch-banner-header">
             <div class="batch-banner-title-group">
@@ -681,7 +685,7 @@ function renderTasksBatchesBanners() {
         </div>
         <div class="batch-banner-actions">
           ${(!isDone && !isStopped && !isFailed) ? `
-          <button class="btn btn-danger btn-sm" data-stop-batch="${b.id}" title="Interromper este lote">
+          <button class="btn btn-danger btn-sm" data-stop-batch="${escapeHtml(b.id)}" title="Interromper este lote">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"></rect></svg>
             <span>Parar</span>
           </button>` : ''}
@@ -700,7 +704,7 @@ function updateAllTaskCardBadges() {
 function updateTaskCardBadges(batch) {
   if (!batch || !batch.tasks) return;
   for (const [tid, tinfo] of Object.entries(batch.tasks)) {
-    const card = document.querySelector(`.task-card[data-id="${tid}"]`);
+    const card = document.querySelector(`.task-card[data-id="${CSS.escape(String(tid))}"]`);
     if (!card) continue;
     const badgeContainer = card.querySelector('.task-card-header-right');
     if (!badgeContainer) continue;
@@ -855,20 +859,20 @@ function renderMatificGrid(container, episodes) {
   container.innerHTML = episodes.map((ep, idx) => {
     const isDone = ep.completed || ep.was_passed;
     const badgeStatus = isDone 
-      ? `<span class="badge badge-success">Concluído (${ep.highest_score || 6}/${ep.problem_count || 6})</span>`
+      ? `<span class="badge badge-success">Concluído (${escapeHtml(ep.highest_score || 6)}/${escapeHtml(ep.problem_count || 6)})</span>`
       : `<span class="badge badge-cyan">Pendente</span>`;
 
     return `
       <div class="task-card glass-panel" data-index="${idx}">
         <div class="task-card-header">
           ${badgeStatus}
-          <span class="task-date">${ep.source || 'Matific'}</span>
+          <span class="task-date">${escapeHtml(ep.source || 'Matific')}</span>
         </div>
-        <h3 class="task-title" title="${ep.title}">${ep.title}</h3>
-        <p class="task-snippet">${ep.subtitle || ep.slug || ''}</p>
+        <h3 class="task-title" title="${escapeHtml(ep.title)}">${escapeHtml(ep.title)}</h3>
+        <p class="task-snippet">${escapeHtml(ep.subtitle || ep.slug || '')}</p>
         <div class="task-footer">
-          <span class="task-meta">${ep.problem_count || 6} questões</span>
-          <button class="btn btn-primary btn-sm btn-open-matific-sim" data-slug="${ep.slug}">
+          <span class="task-meta">${escapeHtml(ep.problem_count || 6)} questões</span>
+          <button class="btn btn-primary btn-sm btn-open-matific-sim" data-slug="${escapeHtml(ep.slug)}">
             <span>${isDone ? 'Refazer' : 'Simular Episódio'}</span>
           </button>
         </div>
@@ -918,8 +922,8 @@ function renderCustomizer() {
     const optionsHtml = [
       `<option value="" ${!currentEquipped ? 'selected' : ''}>Padrão / Desequipado</option>`,
       ...matchingItems.map(item => `
-        <option value="${item}" ${currentEquipped === item ? 'selected' : ''}>
-          ${item.replace(/^Aircraft_|^Outfit_|^Body_/, '').replace(/_/g, ' ')}
+        <option value="${escapeHtml(item)}" ${currentEquipped === item ? 'selected' : ''}>
+          ${escapeHtml(item.replace(/^Aircraft_|^Outfit_|^Body_/, '').replace(/_/g, ' '))}
         </option>
       `)
     ].join('');
@@ -927,10 +931,10 @@ function renderCustomizer() {
     return `
       <div class="slot-card glass-panel">
         <div class="slot-header">
-          <span class="slot-label">${slot.label}</span>
+          <span class="slot-label">${escapeHtml(slot.label)}</span>
           <span class="slot-equipped-badge">${currentEquipped ? 'Equipado' : 'Padrão'}</span>
         </div>
-        <select class="slot-select" data-slot="${slot.key}">
+        <select class="slot-select" data-slot="${escapeHtml(slot.key)}">
           ${optionsHtml}
         </select>
       </div>
@@ -1099,7 +1103,7 @@ function startMatificJobPolling(jobId) {
       el.matificSimProgressFill.style.width = `${pct}%`;
 
       if (job.logs && job.logs.length > 0) {
-        el.matificSimLogs.innerHTML = job.logs.map(l => `<div class="log-line">${l}</div>`).join('');
+        renderLogLines(el.matificSimLogs, job.logs);
         el.matificSimLogs.scrollTop = el.matificSimLogs.scrollHeight;
         el.matificSimStatusText.textContent = job.logs[job.logs.length - 1];
       }
@@ -1230,7 +1234,7 @@ async function pollMatificBatch() {
       }
 
       if (b.logs && b.logs.length > 0) {
-        el.batchTerminalLogs.innerHTML = b.logs.map(l => `<div class="log-line">${l}</div>`).join('');
+        renderLogLines(el.batchTerminalLogs, b.logs);
         el.batchTerminalLogs.scrollTop = el.batchTerminalLogs.scrollHeight;
       }
 
@@ -1281,7 +1285,7 @@ async function openTaskModal(taskId, isEssay, answerId = null) {
     state.currentTask = data;
 
     el.modalTaskTitle.textContent = data.title || 'Atividade';
-    el.taskDescription.innerHTML = data.description ? `<p>${stripHtml(data.description)}</p>` : '';
+    el.taskDescription.innerHTML = data.description ? `<p>${escapeHtml(stripHtml(data.description))}</p>` : '';
 
     if (isEssay) {
       el.questionsContainer.classList.add('hidden');
@@ -1354,8 +1358,8 @@ function renderQuestions(questions) {
     const qType = q.type || 'múltipla escolha';
     if (qType === 'info' || qType === 'section') {
       return `
-        <div class="question-block info-banner glass-panel" id="question-${q.id}">
-          <div class="question-statement">${q.statement || q.text || ''}</div>
+        <div class="question-block info-banner glass-panel" id="question-${escapeHtml(q.id)}">
+          <div class="question-statement">${sanitizeHtml(q.statement || q.text || '')}</div>
         </div>
       `;
     }
@@ -1364,13 +1368,13 @@ function renderQuestions(questions) {
       const opts = q.options || {};
       const maxLen = opts.max_text_count || 2000;
       return `
-        <div class="question-block glass-panel" id="question-${q.id}">
+        <div class="question-block glass-panel" id="question-${escapeHtml(q.id)}">
           <div class="question-header">
             <span class="question-number">Questão ${idx + 1}</span>
-            <span class="badge badge-neutral">${qType}</span>
+            <span class="badge badge-neutral">${escapeHtml(qType)}</span>
           </div>
-          <div class="question-statement">${q.statement || ''}</div>
-          <textarea class="text-answer-input" data-qid="${q.id}" maxlength="${maxLen}" placeholder="Escreva sua resposta (até ${maxLen} caracteres)..."></textarea>
+          <div class="question-statement">${sanitizeHtml(q.statement || '')}</div>
+          <textarea class="text-answer-input" data-qid="${escapeHtml(q.id)}" maxlength="${escapeHtml(maxLen)}" placeholder="Escreva sua resposta (até ${escapeHtml(maxLen)} caracteres)..."></textarea>
         </div>
       `;
     }
@@ -1378,17 +1382,17 @@ function renderQuestions(questions) {
     const normalizedOptions = getNormalizedOptions(q);
 
     return `
-      <div class="question-block glass-panel" id="question-${q.id}">
+      <div class="question-block glass-panel" id="question-${escapeHtml(q.id)}">
         <div class="question-header">
           <span class="question-number">Questão ${idx + 1}</span>
-          <span class="badge badge-neutral">${qType}</span>
+          <span class="badge badge-neutral">${escapeHtml(qType)}</span>
         </div>
-        <div class="question-statement">${q.statement || ''}</div>
-        <div class="options-container" id="options-${q.id}">
+        <div class="question-statement">${sanitizeHtml(q.statement || '')}</div>
+        <div class="options-container" id="options-${escapeHtml(q.id)}">
           ${normalizedOptions.map(opt => `
-            <label class="option-row" data-qid="${q.id}" data-idx="${opt.key}">
-              <input type="${qType === 'multi' ? 'checkbox' : 'radio'}" name="q-${q.id}" value="${opt.key}">
-              <span class="option-text">${opt.text}</span>
+            <label class="option-row" data-qid="${escapeHtml(q.id)}" data-idx="${escapeHtml(opt.key)}">
+              <input type="${qType === 'multi' ? 'checkbox' : 'radio'}" name="q-${escapeHtml(q.id)}" value="${escapeHtml(opt.key)}">
+              <span class="option-text">${escapeHtml(opt.text)}</span>
             </label>
           `).join('')}
         </div>
@@ -1440,12 +1444,12 @@ async function handleAiFill() {
         if (typeof ans === 'object' && ans !== null && !Array.isArray(ans)) {
           for (const [optIdx, isSelected] of Object.entries(ans)) {
             if (isSelected === true || String(isSelected).toLowerCase() === 'true') {
-              const optRow = qElem.querySelector(`.option-row[data-idx="${optIdx}"] input`);
+              const optRow = qElem.querySelector(`.option-row[data-idx="${CSS.escape(String(optIdx))}"] input`);
               if (optRow) optRow.checked = true;
             }
           }
         } else if (typeof ans === 'string' || typeof ans === 'number') {
-          const optRow = qElem.querySelector(`.option-row[data-idx="${ans}"] input`);
+          const optRow = qElem.querySelector(`.option-row[data-idx="${CSS.escape(String(ans))}"] input`);
           if (optRow) optRow.checked = true;
         }
       }
@@ -1482,7 +1486,7 @@ async function handleSubmit(delayed = false) {
     // Respostas de texto (text/text_ai) podem ser editadas no modal antes do envio.
     for (const q of (state.currentTask.questions || [])) {
       if (q.type !== 'text' && q.type !== 'text_ai') continue;
-      const ta = el.questionsContainer.querySelector(`.text-answer-input[data-qid="${q.id}"]`);
+      const ta = el.questionsContainer.querySelector(`.text-answer-input[data-qid="${CSS.escape(String(q.id))}"]`);
       if (ta && ta.value.trim()) {
         payloadAnswers = {
           ...payloadAnswers,
@@ -1562,7 +1566,7 @@ async function loadLeiaSPData() {
   } catch (err) {
     if (mySeq !== state.authSeq) return;
     if (el.leiaspGrid) {
-      el.leiaspGrid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><p style="color:var(--danger);">Erro ao carregar livros: ${err.message}</p></div>`;
+      el.leiaspGrid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><p style="color:var(--danger);">Erro ao carregar livros: ${escapeHtml(err.message)}</p></div>`;
     }
   }
 }
@@ -1577,14 +1581,16 @@ function renderLeiaSPBooks() {
   const activeBookId = state.activeLeiaSPJob && state.activeLeiaSPJob.status === 'running' ? state.activeLeiaSPJob.book_id : null;
 
   el.leiaspGrid.innerHTML = state.leiaspBooks.map(book => {
-    const isDone = book.is_complete || book.progress >= 100;
+    const progress = Math.max(0, Math.min(100, finiteNumber(book.progress)));
+    const isDone = book.is_complete || progress >= 100;
     const isCurrentlyReading = activeBookId && (book.id === activeBookId);
     const statusBadge = isDone
       ? '<span class="task-badge badge-success">Concluído</span>'
-      : (book.progress > 0 ? `<span class="task-badge badge-warning">${book.progress}% lido</span>` : '<span class="task-badge badge-indigo">Pendente</span>');
+      : (book.progress > 0 ? `<span class="task-badge badge-warning">${progress}% lido</span>` : '<span class="task-badge badge-indigo">Pendente</span>');
 
-    const coverImg = book.cover_url
-      ? `<img src="${book.cover_url}" alt="${book.title}" class="book-cover-img" loading="lazy" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';"><div class="book-cover-placeholder" style="display:none;"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></div>`
+    const coverUrl = safeImageUrl(book.cover_url);
+    const coverImg = coverUrl
+      ? `<img src="${escapeHtml(coverUrl)}" alt="${escapeHtml(book.title)}" class="book-cover-img" loading="lazy"><div class="book-cover-placeholder" style="display:none;"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></div>`
       : `<div class="book-cover-placeholder"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg></div>`;
 
     const pagesDisplay = book.total_pages > 0
@@ -1592,11 +1598,11 @@ function renderLeiaSPBooks() {
       : 'Pendente';
 
     return `
-      <div class="leiasp-card glass-panel ${isCurrentlyReading ? 'reading-active' : ''}" data-book-id="${book.id}">
+      <div class="leiasp-card glass-panel ${isCurrentlyReading ? 'reading-active' : ''}" data-book-id="${escapeHtml(book.id)}">
         <div class="book-cover-wrapper">
           ${coverImg}
           <div class="book-cover-overlay">
-            <span class="book-level-badge">${book.level || book.genre || 'Leitura'}</span>
+            <span class="book-level-badge">${escapeHtml(book.level || book.genre || 'Leitura')}</span>
           </div>
         </div>
         <div class="book-info">
@@ -1604,16 +1610,16 @@ function renderLeiaSPBooks() {
             ${statusBadge}
             ${book.is_quiz_active ? '<span class="quiz-badge" title="Contém quiz avaliativo">Quiz</span>' : ''}
           </div>
-          <h4 class="book-title" title="${book.title}">${book.title}</h4>
-          <p class="book-author">${book.author || 'Autor Desconhecido'}</p>
+          <h4 class="book-title" title="${escapeHtml(book.title)}">${escapeHtml(book.title)}</h4>
+          <p class="book-author">${escapeHtml(book.author || 'Autor Desconhecido')}</p>
           <div class="book-meta">
-            <span>Páginas: <strong>${pagesDisplay}</strong></span>
-            <span>Progresso: <strong>${book.progress}%</strong></span>
+            <span>Páginas: <strong>${escapeHtml(pagesDisplay)}</strong></span>
+            <span>Progresso: <strong>${progress}%</strong></span>
           </div>
           <div class="progress-bar-bg" style="background: rgba(255,255,255,0.06); height: 5px; border-radius: 3px; overflow: hidden; margin: 8px 0;">
-            <div style="width: ${book.progress}%; height: 100%; background: ${isDone ? 'var(--success)' : 'var(--primary)'};"></div>
+            <div style="width: ${progress}%; height: 100%; background: ${isDone ? 'var(--success)' : 'var(--primary)'};"></div>
           </div>
-          <button class="btn btn-primary btn-sm btn-block btn-read-book" data-book-id="${book.id}">
+          <button class="btn btn-primary btn-sm btn-block btn-read-book" data-book-id="${escapeHtml(book.id)}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
             <span>${isDone ? 'Ler Novamente' : (book.progress > 0 ? 'Continuar Leitura' : 'Iniciar Leitura')}</span>
           </button>
@@ -1621,6 +1627,13 @@ function renderLeiaSPBooks() {
       </div>
     `;
   }).join('');
+
+  el.leiaspGrid.querySelectorAll('.book-cover-img').forEach(img => {
+    img.addEventListener('error', () => {
+      img.style.display = 'none';
+      if (img.nextElementSibling) img.nextElementSibling.style.display = 'flex';
+    });
+  });
 
   el.leiaspGrid.querySelectorAll('.btn-read-book').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1657,8 +1670,9 @@ function renderActiveLeiaSPBanner(job) {
   if (el.activeBannerTitle) el.activeBannerTitle.textContent = job.book_title || 'Leitura de Livro';
 
   if (el.activeBannerCover) {
-    if (job.book_cover_url) {
-      el.activeBannerCover.src = job.book_cover_url;
+    const coverUrl = safeImageUrl(job.book_cover_url);
+    if (coverUrl) {
+      el.activeBannerCover.src = coverUrl;
       el.activeBannerCover.style.display = 'block';
       if (el.activeBannerCoverFallback) el.activeBannerCoverFallback.style.display = 'none';
     } else {
@@ -1835,7 +1849,7 @@ function pollLeiaSPJob(jobId) {
       }
 
       if (job.logs && el.leiaspLogsBox) {
-        el.leiaspLogsBox.innerHTML = job.logs.map(l => `<div class="log-line">${l}</div>`).join('');
+        renderLogLines(el.leiaspLogsBox, job.logs);
         el.leiaspLogsBox.scrollTop = el.leiaspLogsBox.scrollHeight;
       }
 

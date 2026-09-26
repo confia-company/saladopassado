@@ -45,6 +45,21 @@ Vários alunos podem usar o mesmo backend (inclusive em sequência na mesma aba)
 - **Sessões com validade de 24h**: sessões expiradas são invalidadas e expurgadas automaticamente; o logout também limpa o cache Matific e de tarefas do usuário.
 - **Sem credenciais no repositório**: scripts auxiliares (`auto_runner.py`, `batch_worker.py`) leem credenciais apenas de variáveis de ambiente — nunca commite RA/senha reais.
 
+### Concorrência das tarefas
+
+A abertura da tarefa, a resolução do CAPTCHA e a consulta à IA compartilham um
+semáforo de **5 preparações simultâneas por processo do servidor**, entre todos
+os usuários, lotes e acessos individuais. Lotes maiores são aceitos e as tarefas
+excedentes aparecem como **Na fila**. A vaga é liberada antes do tempo de espera
+e do envio das respostas. Se o envio precisar reabrir a tarefa para atualizar o
+`answer_id`, somente essa reabertura ocupa uma vaga; o POST/PUT das respostas
+continua sem limite de concorrência. Parar um lote impede que tarefas na fila
+iniciem a abertura ou a consulta à IA.
+
+Os enunciados passam pelo DOMPurify, servido localmente, para preservar HTML de
+conteúdo (como imagens e tabelas) removendo scripts e atributos ativos. Os demais
+textos externos e logs são escapados ou inseridos como texto.
+
 Variáveis de ambiente dos scripts auxiliares:
 
 | Variável | Usada por | Descrição |
@@ -112,6 +127,25 @@ uvicorn app:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 Abra seu navegador em [http://localhost:8080](http://localhost:8080) para acessar a interface da plataforma.
+
+---
+
+## Testes de concorrência e segurança da interface
+
+Os testes usam respostas simuladas e não acessam as plataformas externas.
+Para executar os testes de backend e de navegador:
+
+```bash
+pip install -r requirements-dev.txt
+python -m playwright install chromium
+python -m unittest discover -s tests -v
+```
+
+Para executar somente os testes de concorrência com as dependências do backend:
+
+```bash
+python -m unittest discover -s tests -p "test_task_concurrency.py" -v
+```
 
 ---
 
