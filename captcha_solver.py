@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 import os
+import subprocess
 import tempfile
 import uuid
 from config import IPTV_BASE_URL, CAPTCHA_SOLVER_PYTHON, CAPTCHA_PREDICT_SCRIPT, CAPTCHA_MODEL_WEIGHTS
@@ -33,12 +34,14 @@ async def predict_captcha_answer(image_bytes: bytes, python: str = None, model: 
         with open(img_path, "wb") as f:
             f.write(image_bytes)
 
-        proc = await asyncio.create_subprocess_exec(
-            py_exec, CAPTCHA_PREDICT_SCRIPT, img_path, "--model", model_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [py_exec, CAPTCHA_PREDICT_SCRIPT, img_path, "--model", model_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = proc.stdout, proc.stderr
         if proc.returncode != 0:
             err = (stderr or b"").decode(errors="replace").strip()
             raise RuntimeError(f"predict_captcha.py falhou (rc={proc.returncode}): {err[:400]}")
