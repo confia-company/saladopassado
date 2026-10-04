@@ -77,7 +77,7 @@ Variáveis de ambiente dos scripts auxiliares:
 ### 2. Clonar o repositório e preparar o ambiente
 
 ```bash
-git clone https://github.com/seu-usuario/saladopassado.git
+git clone https://github.com/confia-company/saladopassado.git
 cd saladopassado
 
 # Criar e ativar o ambiente virtual
